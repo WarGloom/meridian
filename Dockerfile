@@ -14,7 +14,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user (SDK refuses --dangerously-skip-permissions as root)
-RUN useradd -m -s /bin/bash claude
+RUN useradd -m -s /bin/bash claude \
+    && mkdir -p /home/claude/.claude \
+    && chown -R claude:claude /home/claude
 USER claude
 
 # Install Bun
@@ -44,4 +46,5 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 # Default: passthrough mode with supervisor
 ENV CLAUDE_PROXY_PASSTHROUGH=1
 ENV CLAUDE_PROXY_HOST=0.0.0.0
+ENTRYPOINT ["./bin/docker-entrypoint.sh"]
 CMD ["./bin/claude-proxy-supervisor.sh"]

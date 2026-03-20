@@ -1,12 +1,23 @@
 services:
+  # Fix volume permissions on first run (volumes created as root)
+  init:
+    build: .
+    user: root
+    volumes:
+      - claude-auth:/home/claude/.claude
+    entrypoint: ["bash", "-c", "chown -R claude:claude /home/claude/.claude"]
+    restart: "no"
+
   proxy:
     build: .
     user: "claude"
+    depends_on:
+      init:
+        condition: service_completed_successfully
     ports:
       - "3456:3456"
     volumes:
-      - ~/.claude:/home/claude/.claude
-      - ~/.claude/.claude.json:/home/claude/.claude.json
+      - claude-auth:/home/claude/.claude
     environment:
       - CLAUDE_PROXY_PASSTHROUGH=1
       - CLAUDE_PROXY_HOST=0.0.0.0
@@ -16,3 +27,6 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  claude-auth:
