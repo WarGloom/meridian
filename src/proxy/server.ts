@@ -415,34 +415,118 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
 
 
-      // When resuming, only send the last user message (SDK already has history)
-      const messagesToConvert = isResume
-        ? getLastUserMessage(body.messages || [])
-        : body.messages
+      // When resuming, only send new messages the SDK doesn't have.
+      const allMessages = body.messages || []
+      let messagesToConvert: typeof allMessages
 
-      // Convert messages to a text prompt, preserving all content types
-      const conversationParts = messagesToConvert
-        ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
-          const role = m.role === "assistant" ? "Assistant" : "Human"
-          let content: string
-          if (typeof m.content === "string") {
-            content = m.content
-          } else if (Array.isArray(m.content)) {
-            content = m.content
-              .map((block: any) => {
-                if (block.type === "text" && block.text) return block.text
-                if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
-                if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
-                return ""
-              })
-              .filter(Boolean)
-              .join("\n")
-          } else {
-            content = String(m.content)
+      if (isResume && cachedSession) {
+        const knownCount = cachedSession.messageCount || 0
+        if (knownCount > 0 && knownCount < allMessages.length) {
+          messagesToConvert = allMessages.slice(knownCount)
+        } else {
+          messagesToConvert = getLastUserMessage(allMessages)
+        }
+      } else {
+        messagesToConvert = allMessages
+      }
+
+      // Check if any messages contain multimodal content (images, documents, files)
+      const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
+      const hasMultimodal = messagesToConvert?.some((m: any) =>
+        Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
+      )
+
+      // Strip cache_control from content blocks — the SDK manages its own caching
+      // and OpenCode's ttl='1h' blocks conflict with the SDK's ttl='5m' blocks
+      function stripCacheControl(content: any): any {
+        if (!Array.isArray(content)) return content
+        return content.map((block: any) => {
+          if (block.cache_control) {
+            const { cache_control, ...rest } = block
+            return rest
           }
-          return `${role}: ${content}`
+          return block
         })
-        .join("\n\n") || ""
+      }
+
+      // Build the prompt — either structured (multimodal) or text
+      let prompt: string | AsyncIterable<any>
+
+      if (hasMultimodal) {
+        // Structured messages preserve image/document/file blocks for Claude to see.
+        // The SDK only accepts role:"user" in SDKUserMessage, so assistant messages
+        // are converted to text summaries wrapped as user messages.
+        const structured = messagesToConvert.map((m: any) => {
+          if (m.role === "user") {
+            return {
+              type: "user" as const,
+              message: { role: "user" as const, content: stripCacheControl(m.content) },
+              parent_tool_use_id: null,
+            }
+          }
+          // Convert assistant/tool messages to text summary
+          let text: string
+          if (typeof m.content === "string") {
+            text = `[Assistant: ${m.content}]`
+          } else if (Array.isArray(m.content)) {
+            text = m.content.map((b: any) => {
+              if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
+              if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
+              if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
+              return ""
+            }).filter(Boolean).join("\n")
+          } else {
+            text = `[Assistant: ${String(m.content)}]`
+          }
+          return {
+            type: "user" as const,
+            message: { role: "user" as const, content: text },
+            parent_tool_use_id: null,
+          }
+        })
+
+        // Prepend system context as a text message
+        if (systemContext) {
+          structured.unshift({
+            type: "user" as const,
+            message: { role: "user", content: systemContext },
+            parent_tool_use_id: null,
+          })
+        }
+
+        prompt = (async function* () { for (const msg of structured) yield msg })()
+      } else {
+        // Text prompt — convert messages to string
+        const conversationParts = messagesToConvert
+          ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
+            const role = m.role === "assistant" ? "Assistant" : "Human"
+            let content: string
+            if (typeof m.content === "string") {
+              content = m.content
+            } else if (Array.isArray(m.content)) {
+              content = m.content
+                .map((block: any) => {
+                  if (block.type === "text" && block.text) return block.text
+                  if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
+                  if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
+                  if (block.type === "image") return "[Image attached]"
+                  if (block.type === "document") return "[Document attached]"
+                  if (block.type === "file") return "[File attached]"
+                  return ""
+                })
+                .filter(Boolean)
+                .join("\n")
+            } else {
+              content = String(m.content)
+            }
+            return `${role}: ${content}`
+          })
+          .join("\n\n") || ""
+
+        prompt = systemContext
+          ? `${systemContext}\n\n${conversationParts}`
+          : conversationParts
+      }
 
       // --- Passthrough mode ---
       // When enabled, ALL tool execution is forwarded to OpenCode instead of
@@ -499,10 +583,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             }
           : undefined
 
-      // Combine system context with conversation
-      const prompt = systemContext
-        ? `${systemContext}\n\n${conversationParts}`
-        : conversationParts
+
 
         if (!stream) {
           const contentBlocks: Array<Record<string, unknown>> = []
@@ -1032,6 +1113,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         mode: process.env.CLAUDE_PROXY_PASSTHROUGH ? "passthrough" : "internal",
       })
     }
+  })
+
+  // Catch-all: log unhandled requests
+  app.all("*", (c) => {
+    console.error(`[PROXY] UNHANDLED ${c.req.method} ${c.req.url}`)
+    return c.json({ error: { type: "not_found", message: `Endpoint not supported: ${c.req.method} ${new URL(c.req.url).pathname}` } }, 404)
   })
 
   return { app, config: finalConfig }
