@@ -120,7 +120,7 @@ crush run --model claude-max/claude-sonnet-4-6 "refactor this function"
 crush --model claude-max/claude-opus-4-6       # interactive TUI
 ```
 
-Crush is automatically detected from its `Charm-Crush/` User-Agent — no extra configuration needed.
+Crush is automatically detected from its `Charm-Crush/` User-Agent — no extra configuration needed. In `crush run` headless mode all tool operations (read, write, bash) execute automatically without prompting.
 
 ### Droid (Factory AI)
 

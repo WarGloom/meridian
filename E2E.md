@@ -1416,7 +1416,28 @@ crush run \
 - Proxy log: two entries for the same session — first `lineage=new` (initial turn), then `lineage=continuation` (after tool result returned) — confirms the multi-turn tool loop worked
 - `msgs=` on the second log entry shows `tool_use` and `tool_result` in the message chain
 
-**Note:** `crush run` operates without auto-approval for write operations. Read-only tools (`ls`, `view`, `grep`, `bash` for non-destructive commands) work without prompting. Write/edit operations require interactive approval — use the Crush TUI for those.
+**Note:** In `crush run` (headless) mode, all tool operations execute automatically without prompting — there is no interactive terminal to ask for approval. This includes writes, edits, and bash commands.
+
+---
+
+## C3b: Crush Tool Use (Write)
+
+**Verifies:** Write tool executes automatically in `crush run` headless mode — no approval prompt needed.
+
+```bash
+crush run \
+  --model claude-max/claude-sonnet-4-6 \
+  --cwd /path/to/project \
+  --quiet \
+  "Write the text 'CRUSH_WRITE_OK' to /tmp/crush-write-test.txt"
+
+cat /tmp/crush-write-test.txt   # → CRUSH_WRITE_OK
+rm /tmp/crush-write-test.txt
+```
+
+**Pass criteria:**
+- File exists on disk with correct content
+- Proxy log shows multi-turn: `tool_use` then `tool_result` then final text
 
 ---
 

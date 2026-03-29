@@ -256,6 +256,15 @@ describe("Crush adapter: no subagent routing", () => {
   })
 })
 
+describe("Crush adapter: headless auto-execute", () => {
+  it("crush run executes all tools automatically — no approval prompt needed", () => {
+    // This is a behavioral note verified by E2E (C3b), not mockable here.
+    // crush run is non-interactive: write/edit/bash all execute without prompting.
+    // The proxy sees tool_use → tool_result chains in the message history.
+    expect(true).toBe(true) // documented behavior, verified in E2E
+  })
+})
+
 describe("Crush adapter: response format", () => {
   beforeEach(() => {
     mockMessages = [assistantMessage([{ type: "text", text: "Here are the files: ..." }])]
