@@ -46,7 +46,7 @@ export interface QueryContext {
   /** Effort level — controls thinking depth (low/medium/high/max) */
   effort?: 'low' | 'medium' | 'high' | 'max'
   /** Thinking configuration — adaptive, enabled with budget, or disabled */
-  thinking?: { type: 'adaptive' } | { type: 'enabled'; budgetTokens: number } | { type: 'disabled' }
+  thinking?: { type: 'adaptive' } | { type: 'enabled'; budgetTokens?: number } | { type: 'disabled' }
   /** API-side task budget in tokens — model paces tool use within this limit */
   taskBudget?: { total: number }
   /** Beta features to enable */
