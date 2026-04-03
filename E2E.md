@@ -2383,3 +2383,112 @@ rm -f /tmp/e2e-fc-stream-multi-a.txt /tmp/e2e-fc-stream-multi-b.txt
 kill $(lsof -ti :3457) 2>/dev/null
 rm -f /tmp/proxy-fc-e2e.log
 ```
+
+---
+
+## E31: Passthrough — thinking blocks stripped, Turn 2 prose suppressed
+
+Verifies that Claude's `thinking` content blocks and the SDK's internal Turn 2 prose summary are NOT forwarded to the client in passthrough mode. This fixes the missing diff-UI bug in OpenCode when using Claude Opus (issue #237).
+
+### Setup
+
+```bash
+# Proxy must be running in passthrough mode
+MERIDIAN_PASSTHROUGH=1 MERIDIAN_PORT=3457 npm start &
+sleep 3
+curl -s http://127.0.0.1:3457/health | jq .mode   # → "passthrough"
+
+# Create a test file to edit
+echo 'function greet(name) { return "Hello " + name }' > /tmp/e2e-passthrough-edit.js
+```
+
+### Non-streaming: no thinking, no Turn 2 prose
+
+```bash
+curl -s http://127.0.0.1:3457/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-opus-4-6",
+    "max_tokens": 1024,
+    "stream": false,
+    "messages": [{"role":"user","content":"Edit /tmp/e2e-passthrough-edit.js — replace string concat with a template literal. Use the edit tool."}],
+    "tools": [{
+      "name": "edit",
+      "description": "Edit a file by replacing oldString with newString",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filePath": {"type":"string"},
+          "oldString": {"type":"string"},
+          "newString": {"type":"string"}
+        },
+        "required": ["filePath","oldString","newString"]
+      }
+    }]
+  }' | jq '{
+    stop_reason,
+    block_types: [.content[].type],
+    has_thinking: ([.content[].type] | contains(["thinking"])),
+    has_prose_about_forwarding: ([.content[] | select(.type=="text") | .text // ""] | any(contains("forwarded"))),
+    tool_use_name: (.content[] | select(.type=="tool_use") | .name),
+    tool_input_keys: (.content[] | select(.type=="tool_use") | .input | keys)
+  }'
+```
+
+**Pass criteria:**
+- `stop_reason` = `"tool_use"`
+- `has_thinking` = `false`
+- `has_prose_about_forwarding` = `false`
+- `tool_use_name` = `"edit"`
+- `tool_input_keys` contains `["filePath","oldString","newString"]`
+
+### Streaming: no thinking_delta events forwarded
+
+```bash
+curl -sN http://127.0.0.1:3457/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-opus-4-6",
+    "max_tokens": 1024,
+    "stream": true,
+    "messages": [{"role":"user","content":"Edit /tmp/e2e-passthrough-edit.js — replace string concat with a template literal. Use the edit tool."}],
+    "tools": [{
+      "name": "edit",
+      "description": "Edit a file by replacing oldString with newString",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filePath": {"type":"string"},
+          "oldString": {"type":"string"},
+          "newString": {"type":"string"}
+        },
+        "required": ["filePath","oldString","newString"]
+      }
+    }]
+  }' | tee /tmp/e31-stream.txt | grep "thinking"
+# → (no output)
+
+# Verify the edit tool_use IS in the stream
+grep '"tool_use"' /tmp/e31-stream.txt | head -1
+# → data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"...","name":"edit","input":{}}}
+
+grep '"thinking"' /tmp/e31-stream.txt
+# → (no output — thinking blocks stripped)
+
+rm -f /tmp/e31-stream.txt /tmp/e2e-passthrough-edit.js
+```
+
+**Pass criteria:**
+- `grep '"thinking"'` returns no output
+- A `content_block_start` with `"type":"tool_use"` and `"name":"edit"` is present
+- The stream ends with `event: message_stop`
+
+### Cleanup
+
+```bash
+kill $(lsof -ti :3457) 2>/dev/null
+```

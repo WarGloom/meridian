@@ -673,14 +673,42 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   })
                 }
 
-                // Preserve ALL content blocks (text, tool_use, thinking, etc.)
-                for (const block of message.message.content) {
-                  const b = block as unknown as Record<string, unknown>
-                  // In passthrough mode, strip MCP prefix from tool names
-                  if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
-                    b.name = stripMcpPrefix(b.name as string)
+                // Preserve content blocks, with two passthrough-specific guards:
+                //
+                // 1. Stop-after-tool-use: in passthrough mode the SDK runs 2 turns
+                //    (maxTurns:2 is required to avoid SDK crash). Turn 1 is the real
+                //    response containing the client's tool_use blocks. Turn 2 is an
+                //    SDK artefact — Claude receives a blank tool result and generates
+                //    a prose summary ("The edit has been forwarded..."). That Turn 2
+                //    content must NOT be forwarded; it confuses the client into
+                //    showing prose instead of executing + diff-rendering the tool_use.
+                //
+                // 2. Strip thinking blocks: type:"thinking" / type:"redacted_thinking"
+                //    contain an encrypted signature that is only valid inside Claude's
+                //    native context. Non-native clients (OpenCode, GPT-compat) have no
+                //    renderer for them and may misinterpret or choke on the signature.
+                const isPassthroughTurn2 =
+                  passthrough &&
+                  assistantMessages > 1 &&
+                  contentBlocks.some((b) => b.type === "tool_use")
+
+                if (isPassthroughTurn2) {
+                  // Skip all content from Turn 2 onwards in passthrough mode
+                  claudeLog("passthrough.turn2_skipped", { mode: "non_stream", assistantMessages })
+                } else {
+                  for (const block of message.message.content) {
+                    const b = block as unknown as Record<string, unknown>
+                    // Strip thinking blocks — meaningless to non-native clients
+                    if (passthrough && (b.type === "thinking" || b.type === "redacted_thinking")) {
+                      claudeLog("passthrough.thinking_stripped", { mode: "non_stream", type: b.type })
+                      continue
+                    }
+                    // In passthrough mode, strip MCP prefix from tool names
+                    if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
+                      b.name = stripMcpPrefix(b.name as string)
+                    }
+                    contentBlocks.push(b)
                   }
-                  contentBlocks.push(b)
                 }
                 // Capture token usage from the assistant message
                 const msgUsage = message.message.usage as TokenUsage | undefined
@@ -1048,8 +1076,25 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkToClientIndex.clear()
                       const startUsage = (event as unknown as { message?: { usage?: TokenUsage } }).message?.usage
                       if (startUsage) lastUsage = { ...lastUsage, ...startUsage }
-                      // Only emit the first message_start — subsequent ones are internal SDK turns
+                      // Only emit the first message_start — subsequent ones are internal SDK turns.
+                      // In passthrough mode, the second message_start marks Turn 2 beginning
+                      // (SDK processed the blocked tool call and Claude is now summarising).
+                      // Close the stream immediately — before ANY Turn 2 content blocks reach
+                      // the client — and inject a clean message_delta + message_stop so the
+                      // client sees stop_reason:"tool_use" and executes the tool itself.
                       if (messageStartEmitted) {
+                        if (passthrough && streamedToolUseIds.size > 0) {
+                          safeEnqueue(encoder.encode(
+                            `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: lastUsage?.output_tokens ?? 0 } })}\n\n`
+                          ), "passthrough_turn2_stop")
+                          safeEnqueue(encoder.encode(
+                            `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`
+                          ), "passthrough_turn2_stop")
+                          claudeLog("passthrough.turn2_suppressed", { mode: "stream", toolUses: streamedToolUseIds.size })
+                          streamClosed = true
+                          controller.close()
+                          break
+                        }
                         continue
                       }
                       messageStartEmitted = true
@@ -1065,16 +1110,33 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                     if (eventType === "content_block_start") {
                       const block = (event as any).content_block
+                      // Strip thinking blocks in passthrough mode — non-native clients
+                      // have no renderer for type:"thinking" and may choke on the
+                      // encrypted signature field.
+                      if (
+                        passthrough &&
+                        (block?.type === "thinking" || block?.type === "redacted_thinking")
+                      ) {
+                        if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                        claudeLog("passthrough.thinking_stripped", { mode: "stream", type: block.type, index: eventIndex })
+                        continue
+                      }
                       if (block?.type === "tool_use" && typeof block.name === "string") {
                         if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
-                          // Passthrough mode: strip prefix and forward to OpenCode
+                          // Passthrough mode: SDK sent the name WITH the mcp__oc__ prefix.
+                          // Strip it so OpenCode sees the bare tool name.
                           block.name = stripMcpPrefix(block.name)
-                          // Track this tool_use ID so we don't emit it again from capturedToolUses
                           if (block.id) streamedToolUseIds.add(block.id)
                         } else if (block.name.startsWith("mcp__")) {
-                          // Internal mode: skip all MCP tool blocks (internal execution)
+                          // Internal MCP tool (mcp__opencode__* etc.) — skip, SDK handles it
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                           continue
+                        } else if (passthrough && block.id) {
+                          // Passthrough mode: SDK already stripped the mcp__oc__ prefix before
+                          // emitting the stream_event (observed in practice — the SDK normalises
+                          // tool names in stream events). Track the ID so the early-break
+                          // condition fires correctly.
+                          streamedToolUseIds.add(block.id)
                         }
                       }
                       // Assign a monotonic client index for this forwarded block
