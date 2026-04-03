@@ -408,16 +408,25 @@ describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
 
 describe("GET /v1/sessions/:claudeSessionId/context-usage — shared store", () => {
   let tmpSessionDir: string
+  let prevEnv: string | undefined
 
   beforeEach(() => {
     tmpSessionDir = mkdtempSync(join(tmpdir(), "sdk-params-session-store-"))
-    setSessionStoreDir(tmpSessionDir)
-    // Do NOT call clearSessionCache() here — it calls clearSharedSessions() which
-    // would immediately wipe the tmp dir we just wrote to.
+    // Use env var instead of setSessionStoreDir so this test is not sensitive
+    // to setSessionStoreDir being overwritten by parallel test files sharing
+    // the same Bun process. clearSessionCache() clears the in-memory LRU only;
+    // shared-store reads go via env var which we own for this test.
+    prevEnv = process.env.MERIDIAN_SESSION_DIR
+    process.env.MERIDIAN_SESSION_DIR = tmpSessionDir
+    clearSessionCache()
   })
 
   afterEach(() => {
-    setSessionStoreDir(null)
+    if (prevEnv !== undefined) {
+      process.env.MERIDIAN_SESSION_DIR = prevEnv
+    } else {
+      delete process.env.MERIDIAN_SESSION_DIR
+    }
     clearSessionCache()
     try { rmSync(tmpSessionDir, { recursive: true, force: true }) } catch {}
   })
