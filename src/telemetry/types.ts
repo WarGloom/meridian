@@ -152,3 +152,49 @@ export interface TelemetrySummary {
     cacheMissOnResumeCount: number
   }
 }
+
+/** Storage backend for request metrics. */
+export interface ITelemetryStore {
+  /** Record a completed request metric. */
+  record(metric: RequestMetric): void
+  /** Number of stored metrics. */
+  readonly size: number
+  /** Retrieve recent metrics, newest first. */
+  getRecent(options?: {
+    limit?: number
+    since?: number
+    model?: string
+  }): RequestMetric[]
+  /** Compute aggregate statistics over a time window. */
+  summarize(windowMs?: number): TelemetrySummary
+  /** Clear all stored metrics. */
+  clear(): void
+}
+
+/** Diagnostic log entry. */
+export interface DiagnosticLog {
+  /** Unix timestamp */
+  timestamp: number
+  /** Log level */
+  level: "info" | "warn" | "error"
+  /** Log category for filtering */
+  category: "session" | "lineage" | "error" | "lifecycle"
+  /** Request ID (if associated with a request) */
+  requestId?: string
+  /** Human-readable message */
+  message: string
+}
+
+/** Storage backend for diagnostic logs. */
+export interface IDiagnosticLogStore {
+  log(entry: Omit<DiagnosticLog, "timestamp">): void
+  session(message: string, requestId?: string): void
+  lineage(message: string, requestId?: string): void
+  error(message: string, requestId?: string): void
+  getRecent(options?: {
+    limit?: number
+    since?: number
+    category?: string
+  }): DiagnosticLog[]
+  clear(): void
+}
