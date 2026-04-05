@@ -8,8 +8,7 @@
  *
  * Key characteristics:
  * - Passthrough mode always enabled (overrides MERIDIAN_PASSTHROUGH env var)
- * - Non-streaming: LiteLLM health checks don't send x-litellm-* headers
- *   so we can't reliably distinguish them; non-streaming is safe for all requests
+ * - Streaming: respects the client's stream parameter (body.stream)
  * - Session continuity: uses x-litellm-session-id header when present
  * - CWD: extracts from <env cwd="..."> blocks in the prompt if available
  * - MCP server name: "litellm" (tools appear as mcp__litellm__*)
