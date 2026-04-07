@@ -83,12 +83,14 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      // NOTE: agent-specific (passthrough mode) — 2 turns are required, not 1.
+      // NOTE: agent-specific (passthrough mode) — 2 turns minimum, not 1.
       // Turn 1: model generates tool_use blocks (captured by PreToolUse hook).
       // Turn 2: SDK processes the blocked-tool handoff before the generator
       //         returns. maxTurns: 1 throws "Reached maximum number of turns (1)"
       //         before the response is complete, causing HTTP 500s.
-      maxTurns: passthrough ? 2 : 200,
+      // On resume: the SDK may spend a turn rehydrating session state before
+      // the model responds, so allow 3 turns to prevent "max turns (2)" errors.
+      maxTurns: passthrough ? (resumeSessionId ? 3 : 2) : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,

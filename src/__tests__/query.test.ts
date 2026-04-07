@@ -51,6 +51,11 @@ describe("buildQueryOptions", () => {
     expect(result.options.maxTurns).toBe(2)
   })
 
+  it("sets maxTurns to 3 in passthrough mode with resume (extra turn for session rehydration)", () => {
+    const result = buildQueryOptions(makeContext({ passthrough: true, resumeSessionId: "sess-123" }))
+    expect(result.options.maxTurns).toBe(3)
+  })
+
   it("includes system prompt as preset in normal mode", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
