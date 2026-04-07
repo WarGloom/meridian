@@ -1542,6 +1542,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   hasDeferredTools,
                   deferredToolCount: hasDeferredTools ? deferredToolCount : undefined,
                   toolCount,
+                  discoveredTools: discoveredTools.size > 0 ? [...discoveredTools] : undefined,
                   lineageType,
                   messageCount: allMessages.length,
                   sdkSessionId: currentSessionId || resumeSessionId,
