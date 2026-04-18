@@ -2,6 +2,8 @@ import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { serve } from "@hono/node-server"
 import type { Server } from "node:http"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
@@ -29,6 +31,8 @@ import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { runTransformHook, buildPipeline, createRequestContext } from "./transform"
 import { getAdapterTransforms } from "./transforms/registry"
+import { loadPlugins, getActiveTransforms } from "./plugins/loader"
+import type { LoadedPlugin } from "./plugins/types"
 import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile } from "./profiles"
 import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
@@ -215,6 +219,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // so silently-updated tool definitions force a rebuild.
   const sessionMcpCache = new LRUMap<string, { key: string; mcp: ReturnType<typeof createPassthroughMcpServer> }>(getMaxSessionsLimit())
 
+  const pluginDir = join(homedir(), ".config", "meridian", "plugins")
+  const pluginConfigPath = join(pluginDir, "plugins.json")
+  let loadedPlugins: LoadedPlugin[] = []
+  let pluginTransforms: ReturnType<typeof getActiveTransforms> = []
+
   const app = new Hono()
 
   app.use("*", cors())
@@ -338,7 +347,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         // Run the transform pipeline — adapter transforms populate SDK configuration
         const adapterTransforms = getAdapterTransforms(adapter.name)
-        const pipeline = buildPipeline(adapterTransforms, [])
+        const pipeline = buildPipeline(adapterTransforms, pluginTransforms)
         const pipelineCtx = runTransformHook(pipeline, "onRequest", createRequestContext({
           adapter: adapter.name,
           body,
@@ -2014,6 +2023,46 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     return c.json({ success: true, activeProfile: body.profile })
   })
 
+  // --- Plugin management routes ---
+
+  app.use("/plugins/*", requireAuth)
+  app.use("/plugins", requireAuth)
+
+  app.get("/plugins/list", (c) => {
+    return c.json({
+      plugins: loadedPlugins.map(p => ({
+        name: p.name,
+        description: p.description,
+        version: p.version,
+        adapters: p.adapters,
+        hooks: p.hooks,
+        status: p.status,
+        path: p.path,
+        ...(p.error ? { error: p.error } : {}),
+      })),
+    })
+  })
+
+  app.post("/plugins/reload", async (c) => {
+    try {
+      loadedPlugins = await loadPlugins(pluginDir, pluginConfigPath)
+      pluginTransforms = getActiveTransforms(loadedPlugins)
+      const active = loadedPlugins.filter(p => p.status === "active").length
+      console.error(`[PROXY] Plugins reloaded: ${active} active`)
+      return c.json({
+        success: true,
+        plugins: loadedPlugins.map(p => ({
+          name: p.name,
+          status: p.status,
+          hooks: p.hooks,
+          ...(p.error ? { error: p.error } : {}),
+        })),
+      })
+    } catch (err) {
+      return c.json({ success: false, error: String(err) }, 500)
+    }
+  })
+
   app.post("/auth/refresh", async (c) => {
     const success = await refreshOAuthToken()
     if (success) {
@@ -2193,12 +2242,28 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     return c.json({ error: { type: "not_found", message: `Endpoint not supported: ${c.req.method} ${new URL(c.req.url).pathname}` } }, 404)
   })
 
-  return { app, config: finalConfig }
+  async function initPluginsAsync(): Promise<void> {
+    try {
+      loadedPlugins = await loadPlugins(pluginDir, pluginConfigPath)
+      pluginTransforms = getActiveTransforms(loadedPlugins)
+      if (loadedPlugins.length > 0) {
+        const active = loadedPlugins.filter(p => p.status === "active").length
+        const disabled = loadedPlugins.filter(p => p.status === "disabled").length
+        const errored = loadedPlugins.filter(p => p.status === "error").length
+        console.error(`[PROXY] Plugins loaded: ${active} active, ${disabled} disabled, ${errored} errors`)
+      }
+    } catch (err) {
+      console.error(`[PROXY] Plugin loading failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  return { app, config: finalConfig, initPlugins: initPluginsAsync }
 }
 
 export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promise<ProxyInstance> {
   claudeExecutable = await resolveClaudeExecutableAsync()
-  const { app, config: finalConfig } = createProxyServer(config)
+  const { app, config: finalConfig, initPlugins } = createProxyServer(config)
+  if (initPlugins) await initPlugins()
 
   const server = serve({
     fetch: app.fetch,

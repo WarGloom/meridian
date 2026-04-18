@@ -30,6 +30,8 @@ export interface ProxyServer {
   app: { fetch: (request: Request, ...rest: any[]) => Response | Promise<Response> }
   /** The resolved proxy configuration */
   config: ProxyConfig
+  /** Load plugins from disk and wire them into the request pipeline */
+  initPlugins?(): Promise<void>
 }
 
 export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
