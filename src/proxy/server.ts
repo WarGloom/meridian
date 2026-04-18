@@ -220,7 +220,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   const sessionMcpCache = new LRUMap<string, { key: string; mcp: ReturnType<typeof createPassthroughMcpServer> }>(getMaxSessionsLimit())
 
   const pluginDir = join(homedir(), ".config", "meridian", "plugins")
-  const pluginConfigPath = join(pluginDir, "plugins.json")
+  const pluginConfigPath = join(homedir(), ".config", "meridian", "plugins.json")
   let loadedPlugins: LoadedPlugin[] = []
   let pluginTransforms: ReturnType<typeof getActiveTransforms> = []
 
