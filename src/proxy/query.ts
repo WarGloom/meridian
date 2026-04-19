@@ -152,15 +152,15 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...resolveSystemPrompt(systemContext, passthrough, settingSources, codeSystemPrompt, clientSystemPrompt),
       ...(passthrough
         ? {
-            disallowedTools: allBlockedTools,
+            disallowedTools: [...allBlockedTools],
             ...(passthroughMcp ? {
-              allowedTools: passthroughMcp.toolNames,
+              allowedTools: [...passthroughMcp.toolNames],
               mcpServers: { [PASSTHROUGH_MCP_NAME]: passthroughMcp.server },
             } : {}),
           }
         : {
-            disallowedTools: allBlockedTools,
-            allowedTools: allowedMcpTools,
+            disallowedTools: [...allBlockedTools],
+            allowedTools: [...allowedMcpTools],
             mcpServers: { [mcpServerName]: createOpencodeMcpServer() },
           }),
       plugins: [],

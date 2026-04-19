@@ -10,6 +10,18 @@ import { DEFAULT_PROXY_CONFIG } from "./types"
 import { envBool } from "../env"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
 export type { ProxyConfig, ProxyInstance, ProxyServer }
+// Public plugin-authoring types. Plugins import these to type their
+// onRequest / onResponse / onTelemetry hooks against.
+export type {
+  Transform,
+  RequestContext,
+  ResponseContext,
+  TelemetryContext,
+  SessionContext,
+  ToolUseContext,
+  ToolResultContext,
+  ErrorContext,
+} from "./transform"
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
