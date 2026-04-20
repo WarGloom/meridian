@@ -275,7 +275,7 @@ function render(s, reqs, logs) {
     const sessionShort = r.sdkSessionId ? r.sdkSessionId.slice(0, 8) : '—';
     const msgCount = r.messageCount != null ? r.messageCount : '?';
 
-    const sourceBadge = r.requestSource ? '<br><span style="font-size:9px;color:var(--violet);font-family:\'SF Mono\',monospace">' + r.requestSource + '</span>' : '';
+    const sourceBadge = r.requestSource ? '<br><span class="mono" style="font-size:9px;color:var(--violet)">' + r.requestSource + '</span>' : '';
 
     html += '<tr>'
       + '<td class="mono">' + ago(r.timestamp) + '</td>'
