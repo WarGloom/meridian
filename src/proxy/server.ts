@@ -34,7 +34,8 @@ import { exec as execCallback } from "child_process"
 import { promisify } from "util"
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
-import { createPassthroughMcpServer, stripMcpPrefix, computeToolSetKey, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
+import { createPassthroughMcpServer, stripMcpPrefix, normalizeToolInput, computeToolSetKey, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
+import { resolveAgentAlias } from "./agentMatch"
 import { LRUMap } from "../utils/lruMap"
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics } from "../telemetry"
@@ -44,7 +45,7 @@ import { refreshOAuthToken } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
 import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, translateAnthropicSseEvent, buildModelList } from "./openai"
-import { getLastUserMessage } from "./messages"
+import { extractAdvisorModel, getLastUserMessage, stripAdvisorTools } from "./messages"
 import { requireAuth, authEnabled } from "./auth"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
@@ -744,6 +745,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // previously sent them, reuse the cached set to preserve prompt cache.
       let passthroughMcp: ReturnType<typeof createPassthroughMcpServer> | undefined
       let requestTools = Array.isArray(body.tools) ? body.tools : []
+      // Extract advisor model from tools and strip advisor tool definitions
+      // before passing to passthrough MCP — the SDK handles advisors natively
+      // via the advisorModel query option.
+      const advisorModel = extractAdvisorModel(requestTools)
+      if (advisorModel) {
+        requestTools = stripAdvisorTools(requestTools)
+      }
       if (passthrough && requestTools.length === 0 && profileSessionId) {
         const cached = sessionToolCache.get(profileSessionId)
         if (cached && cached.length > 0) {
@@ -806,10 +814,22 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (hasDeferredTools && coreSet && !coreSet.has(toolName.toLowerCase())) {
                   discoveredTools.add(toolName)
                 }
+                // Normalize parameter names: the SDK system prompt references
+                // built-in tools with snake_case params (file_path), but clients
+                // may use camelCase (filePath). Remap when required fields are missing.
+                const clientTool = requestTools.find((t: any) => t.name === toolName)
+                // NOTE: agent-specific — normalize subagent_type for the client response.
+                // Claude often sends PascalCase (e.g., "Explore") and aliases
+                // (e.g., "general-purpose") that OpenCode rejects. We send the
+                // canonical lowercase agent name that OpenCode's config declares.
+                let toolInput = normalizeToolInput(input.tool_input, clientTool?.input_schema)
+                if (toolName.toLowerCase() === "task" && toolInput?.subagent_type && typeof toolInput.subagent_type === "string") {
+                  toolInput = { ...toolInput, subagent_type: resolveAgentAlias(toolInput.subagent_type) }
+                }
                 capturedToolUses.push({
                   id: input.tool_use_id,
                   name: toolName,
-                  input: input.tool_input,
+                  input: toolInput,
                 })
                 return {
                   decision: "block" as const,
@@ -849,6 +869,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
           claudeLog("upstream.start", { mode: "non_stream", model })
           let lastUsage: TokenUsage | undefined
+          let lastStopReason: string | undefined
 
           try {
             // Lazy-resolve executable if not already set (e.g. when using createProxyServer directly)
@@ -888,6 +909,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     additionalDirectories: sdkFeatures.additionalDirectories
                       ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                       : undefined,
+                    advisorModel,
                   }))) {
                     // Only count real assistant content — not SDK error messages
                     // (which arrive as type:"assistant" with an error field set).
@@ -928,6 +950,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       additionalDirectories: sdkFeatures.additionalDirectories
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
+                      advisorModel,
                     }))
                     return
                   }
@@ -1063,6 +1086,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // Capture token usage from the assistant message
                 const msgUsage = message.message.usage as TokenUsage | undefined
                 if (msgUsage) lastUsage = { ...lastUsage, ...msgUsage }
+                if (typeof message.message.stop_reason === "string") {
+                  lastStopReason = message.message.stop_reason
+                }
               }
             }
 
@@ -1097,25 +1123,39 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             throw error
           }
 
-          // In passthrough mode, add captured tool_use blocks from the hook
-          // (the SDK may not include them in content after blocking)
+          // In passthrough mode, merge captured tool_use blocks from the hook.
+          // The PreToolUse hook normalizes tool input (e.g., subagent_type casing,
+          // parameter name mapping). If the SDK already included the tool_use in
+          // its content blocks, replace the input with the normalized version.
+          // If the SDK omitted it (blocked tools may not appear), add it.
           if (passthrough && capturedToolUses.length > 0) {
-            for (const tu of capturedToolUses) {
-              // Only add if not already in contentBlocks
-              if (!contentBlocks.some((b) => b.type === "tool_use" && (b as any).id === tu.id)) {
-                contentBlocks.push({
-                  type: "tool_use",
-                  id: tu.id,
-                  name: tu.name,
-                  input: tu.input,
-                })
+            const capturedById = new Map(capturedToolUses.map(tu => [tu.id, tu]))
+            for (const block of contentBlocks) {
+              if (block.type === "tool_use" && capturedById.has((block as any).id)) {
+                const captured = capturedById.get((block as any).id)!
+                ;(block as any).name = captured.name
+                ;(block as any).input = captured.input
+                capturedById.delete((block as any).id)
               }
+            }
+            // Add any remaining captured tool_use blocks not in content
+            for (const tu of capturedById.values()) {
+              contentBlocks.push({
+                type: "tool_use",
+                id: tu.id,
+                name: tu.name,
+                input: tu.input,
+              })
             }
           }
 
-          // Determine stop_reason based on content: tool_use if any tool blocks, else end_turn
+          // Determine stop_reason: use content-based heuristic for standard cases,
+          // but preserve non-standard upstream values like pause_turn (advisor flows)
           const hasToolUse = contentBlocks.some((b) => b.type === "tool_use")
-          const stopReason = hasToolUse ? "tool_use" : "end_turn"
+          const heuristicStopReason = hasToolUse ? "tool_use" : "end_turn"
+          const stopReason = lastStopReason && lastStopReason !== "end_turn" && lastStopReason !== "tool_use"
+            ? lastStopReason
+            : heuristicStopReason
 
           // Append file change summary:
           // - Internal mode: fileChanges populated by PostToolUse hook
@@ -1310,6 +1350,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       additionalDirectories: sdkFeatures.additionalDirectories
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
+                      advisorModel,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -1347,6 +1388,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         additionalDirectories: sdkFeatures.additionalDirectories
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
+                        advisorModel,
                       }))
                       return
                     }
@@ -1434,6 +1476,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               }, 15_000)
 
               const skipBlockIndices = new Set<number>()
+              // NOTE: agent-specific — track block indices for "task" tool_use blocks
+              // so we can normalize subagent_type in streamed input_json_delta events.
+              // Deltas are buffered because input_json_delta sends JSON in chunks —
+              // the key-value pair may span multiple deltas, preventing regex match.
+              const taskToolBlockIndices = new Set<number>()
+              const taskToolJsonBuffer = new Map<number, string>()
               const streamedToolUseIds = new Set<string>()
 
               // Block index remapping: the SDK resets indices on each turn, but
@@ -1547,6 +1595,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           // condition fires correctly.
                           streamedToolUseIds.add(block.id)
                         }
+                        // NOTE: agent-specific — track "task" tool blocks so we can
+                        // normalize subagent_type in their streamed input_json_delta.
+                        if (passthrough && eventIndex !== undefined && block.name.toLowerCase() === "task") {
+                          taskToolBlockIndices.add(eventIndex)
+                        }
                       }
                       // Assign a monotonic client index for this forwarded block
                       if (eventIndex !== undefined) {
@@ -1573,6 +1626,52 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       if (stopReason === "tool_use" && skipBlockIndices.size > 0) {
                         // All tool_use blocks in this turn were MCP — skip this delta
                         continue
+                      }
+                    }
+
+                    // NOTE: agent-specific — buffer input_json_delta for Task tool blocks.
+                    // Claude sends PascalCase subagent_type (e.g., "Explore") and aliases
+                    // like "general-purpose" that OpenCode rejects. input_json_delta sends
+                    // JSON in chunks so we can't normalize individual deltas — buffer
+                    // all chunks, parse the complete JSON, and emit the fixed version
+                    // at content_block_stop.
+                    if (
+                      passthrough &&
+                      eventIndex !== undefined &&
+                      taskToolBlockIndices.has(eventIndex)
+                    ) {
+                      if (eventType === "content_block_delta") {
+                        const delta = (event as any).delta
+                        if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+                          const prev = taskToolJsonBuffer.get(eventIndex) ?? ""
+                          taskToolJsonBuffer.set(eventIndex, prev + delta.partial_json)
+                          continue // Don't forward — emit complete JSON at block_stop
+                        }
+                      }
+                      if (eventType === "content_block_stop") {
+                        const buffered = taskToolJsonBuffer.get(eventIndex)
+                        if (buffered) {
+                          let fixed = buffered
+                          try {
+                            const parsed = JSON.parse(buffered) as Record<string, unknown>
+                            if (typeof parsed.subagent_type === "string") {
+                              parsed.subagent_type = resolveAgentAlias(parsed.subagent_type)
+                            }
+                            fixed = JSON.stringify(parsed)
+                          } catch {
+                            // Malformed JSON — forward buffer unchanged rather than drop the block
+                          }
+                          const clientIdx = sdkToClientIndex.get(eventIndex) ?? eventIndex
+                          safeEnqueue(encoder.encode(
+                            `event: content_block_delta\ndata: ${JSON.stringify({
+                              type: "content_block_delta",
+                              index: clientIdx,
+                              delta: { type: "input_json_delta", partial_json: fixed }
+                            })}\n\n`
+                          ), "task_tool_fixed_delta")
+                          taskToolJsonBuffer.delete(eventIndex)
+                        }
+                        // Fall through to forward content_block_stop normally
                       }
                     }
 

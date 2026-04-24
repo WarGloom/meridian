@@ -74,6 +74,36 @@ describe("buildQueryOptions", () => {
     expect(result.options.maxTurns).toBe(4)
   })
 
+  it("sets maxTurns to 5 in passthrough mode with advisor (base 2 + 3 for advisor call/result/answer)", () => {
+    const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7" }))
+    expect(result.options.maxTurns).toBe(5)
+  })
+
+  it("sets maxTurns to 6 in passthrough mode with advisor + resume", () => {
+    const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", resumeSessionId: "sess-123" }))
+    expect(result.options.maxTurns).toBe(6)
+  })
+
+  it("sets maxTurns to 6 in passthrough mode with advisor + deferred tools", () => {
+    const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", hasDeferredTools: true }))
+    expect(result.options.maxTurns).toBe(6)
+  })
+
+  it("sets maxTurns to 7 in passthrough mode with advisor + resume + deferred tools (all three active)", () => {
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      advisorModel: "claude-opus-4-7",
+      resumeSessionId: "sess-123",
+      hasDeferredTools: true,
+    }))
+    expect(result.options.maxTurns).toBe(7)
+  })
+
+  it("does not bump maxTurns in non-passthrough mode when advisor is set", () => {
+    const result = buildQueryOptions(makeContext({ advisorModel: "claude-opus-4-7" }))
+    expect(result.options.maxTurns).toBe(200)
+  })
+
   it("includes system prompt as preset in normal mode", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
