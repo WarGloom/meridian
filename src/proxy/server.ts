@@ -446,8 +446,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // so user-provided ANTHROPIC_DEFAULT_* values still win.
         const sdkModelDefaults = resolveSdkModelDefaults()
 
-        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account)
-        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...profile.env }
+        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account).
+        // Drop undefined profile entries so they don't erase the SDK model pins.
+        const definedProfileEnv = Object.fromEntries(
+          Object.entries(profile.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+        )
+        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...definedProfileEnv }
 
         let systemContext = ""
         if (body.system) {
