@@ -1,6 +1,13 @@
 # Changelog
 
-## [1.39.0](https://github.com/rynfar/meridian/compare/meridian-v1.38.0...meridian-v1.39.0) (2026-04-24)
+## [1.39.1](https://github.com/rynfar/meridian/compare/meridian-v1.39.0...meridian-v1.39.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* **detect:** MERIDIAN_DEFAULT_AGENT wins over claude-cli/* UA tiebreaker ([#433](https://github.com/rynfar/meridian/issues/433)) ([aa69984](https://github.com/rynfar/meridian/commit/aa69984b029a7b50ae906f40d44fa31b2391751f))
+
+## [1.39.0](https://github.com/rynfar/meridian/compare/meridian-v1.38.0...meridian-v1.39.0) (2026-04-26)
 
 
 ### Features
@@ -13,6 +20,8 @@
 ### Bug Fixes
 
 * align haiku model id with sonnet/opus short form ([#414](https://github.com/rynfar/meridian/issues/414)) ([47292f5](https://github.com/rynfar/meridian/commit/47292f589186abf22196193801787a5e7cb5f523))
+* **models:** list claude-opus-4-7 in /v1/models ([#429](https://github.com/rynfar/meridian/issues/429)) ([b72bab8](https://github.com/rynfar/meridian/commit/b72bab87cf4f4b0e8e019a29eff1d168bfd5c7b0))
+* **models:** pin SDK model aliases via ANTHROPIC_DEFAULT_*_MODEL env ([601ccd3](https://github.com/rynfar/meridian/commit/601ccd31b1a02d92e92b5897dbec2259198428b7))
 * normalize context-usage to last iteration ([67a559f](https://github.com/rynfar/meridian/commit/67a559fd8ba39463398ed22f18c133d5bd82196b))
 * normalize context-usage to last iteration ([0170adc](https://github.com/rynfar/meridian/commit/0170adcdfed101d94cbac4d8ed0e051f373bab07))
 * normalize subagent_type in passthrough streaming and non-streaming ([41170e4](https://github.com/rynfar/meridian/commit/41170e4699c64660e7aa522da7b97d7c9ff6f386))
