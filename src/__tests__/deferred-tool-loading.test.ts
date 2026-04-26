@@ -242,7 +242,7 @@ describe("auto-defer — threshold-based deferral via HTTP", () => {
     expect(capturedQueryParams.options.env.ENABLE_TOOL_SEARCH).toBe("false")
   })
 
-  it("sets maxTurns to 3 when deferred tools are present", async () => {
+  it("keeps the fixed passthrough maxTurns ceiling when deferred tools are present", async () => {
     mockMessages = [assistantMessage([{ type: "text", text: "Hello" }])]
 
     await app().fetch(new Request("http://localhost/v1/messages", {
@@ -255,10 +255,10 @@ describe("auto-defer — threshold-based deferral via HTTP", () => {
       })),
     }))
 
-    expect(capturedQueryParams.options.maxTurns).toBe(3)
+    expect(capturedQueryParams.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 2 when no deferred tools", async () => {
+  it("keeps the fixed passthrough maxTurns ceiling when no deferred tools are present", async () => {
     mockMessages = [assistantMessage([{ type: "text", text: "Hello" }])]
 
     await app().fetch(new Request("http://localhost/v1/messages", {
@@ -271,7 +271,7 @@ describe("auto-defer — threshold-based deferral via HTTP", () => {
       })),
     }))
 
-    expect(capturedQueryParams.options.maxTurns).toBe(2)
+    expect(capturedQueryParams.options.maxTurns).toBe(30)
   })
 
   it("disables auto-defer when threshold is 0", async () => {

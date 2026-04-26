@@ -101,29 +101,19 @@ export interface BuildQueryResult {
   options: Options
 }
 
+const PASSTHROUGH_MAX_TURNS = 30
+
 /**
  * NOTE: agent-specific (passthrough mode).
  *
- * Compute maxTurns based on which SDK features are active. Each phase the SDK
- * walks before returning control to the host costs a turn:
- *   - Base (2): turn 1 generates tool_use blocks (captured by PreToolUse hook),
- *     turn 2 processes the blocked-tool handoff. maxTurns: 1 throws "Reached
- *     maximum number of turns (1)" before the response completes → HTTP 500.
- *   - Resume (+1): SDK spends a turn rehydrating session state.
- *   - Deferred tools (+1): ToolSearch consumes a turn before the real tool call.
- *   - Both resume and deferred tools: each consumes its own turn, so the base
- *     budget becomes 4 rather than 3.
- *   - Advisor (+3): server-side advisor executes call + result + final answer.
+ * maxTurns is a safety ceiling for SDK agent/tool round trips, not an exact
+ * phase budget. Passthrough still needs enough room for variable SDK internals:
+ * blocked-tool handoff, session resume, deferred ToolSearch, multimodal setup,
+ * and optional advisor turns. Exact phase counting caused real screenshot flows
+ * to fail with "Reached maximum number of turns (4)" before a useful tool call.
  */
-function computePassthroughMaxTurns(
-  resumeSessionId: string | undefined,
-  hasDeferredTools: boolean,
-  advisorModel: string | undefined,
-): number {
-  const hasResume = !!resumeSessionId
-  const base = hasResume && hasDeferredTools ? 4 : (hasResume || hasDeferredTools) ? 3 : 2
-  const advisorBump = advisorModel ? 3 : 0
-  return base + advisorBump
+function computePassthroughMaxTurns(): number {
+  return PASSTHROUGH_MAX_TURNS
 }
 
 /**
@@ -198,9 +188,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      maxTurns: passthrough
-        ? computePassthroughMaxTurns(resumeSessionId, hasDeferredTools, ctx.advisorModel)
-        : 200,
+      maxTurns: passthrough ? computePassthroughMaxTurns() : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
