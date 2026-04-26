@@ -1053,13 +1053,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                 // Preserve content blocks, with two passthrough-specific guards:
                 //
-                // 1. Stop-after-tool-use: in passthrough mode the SDK runs 2 turns
-                //    (maxTurns:2 is required to avoid SDK crash). Turn 1 is the real
-                //    response containing the client's tool_use blocks. Turn 2 is an
-                //    SDK artefact — Claude receives a blank tool result and generates
-                //    a prose summary ("The edit has been forwarded..."). That Turn 2
-                //    content must NOT be forwarded; it confuses the client into
-                //    showing prose instead of executing + diff-rendering the tool_use.
+                // 1. Stop-after-tool-use: passthrough gives the SDK a high enough
+                //    maxTurns ceiling to survive variable internal setup before the
+                //    real response containing the client's tool_use blocks. Any later
+                //    SDK turn is an artefact: Claude receives a blank tool result and
+                //    generates a prose summary ("The edit has been forwarded...").
+                //    That later content must NOT be forwarded; it confuses the client
+                //    into showing prose instead of executing and diff-rendering the
+                //    tool_use.
                 //
                 // 2. Strip thinking blocks: type:"thinking" / type:"redacted_thinking"
                 //    contain an encrypted signature that is only valid inside Claude's
