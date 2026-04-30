@@ -43,11 +43,11 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
-// Fix auth status so mapModelToClaudeModel always picks the max/1m path
+// Fix auth status so model mapping behavior stays deterministic in this file.
 mock.module("../proxy/models", () => ({
   mapModelToClaudeModel: (model: string, sub?: string | null, agentMode?: string | null) => {
     const base = model.toLowerCase()
-    if (base.includes("opus")) return agentMode === "subagent" ? "opus" : "opus[1m]"
+    if (base.includes("opus")) return "opus"
     if (base.includes("haiku")) return "haiku"
     // Sonnet [1m] requires Extra Usage on Max — default to 200k for all agents
     return "sonnet"
@@ -112,9 +112,9 @@ describe("Subagent model selection", () => {
     expect(capturedModel).toBe("opus")
   })
 
-  it("primary agent with opus gets opus[1m]", async () => {
+  it("primary agent with opus gets base opus by default", async () => {
     await post({ ...BASE_REQUEST, model: "claude-opus-4-6" }, { "x-opencode-agent-mode": "primary" })
-    expect(capturedModel).toBe("opus[1m]")
+    expect(capturedModel).toBe("opus")
   })
 
   it("haiku is unaffected by agent mode", async () => {
