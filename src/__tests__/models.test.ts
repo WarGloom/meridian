@@ -7,16 +7,31 @@ import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthSt
 
 describe("mapModelToClaudeModel", () => {
   const originalSonnetModel = process.env.CLAUDE_PROXY_SONNET_MODEL
+  const originalMeridianSonnetModel = process.env.MERIDIAN_SONNET_MODEL
+  const originalOpusModel = process.env.CLAUDE_PROXY_OPUS_MODEL
+  const originalMeridianOpusModel = process.env.MERIDIAN_OPUS_MODEL
 
   afterEach(() => {
     if (originalSonnetModel === undefined) delete process.env.CLAUDE_PROXY_SONNET_MODEL
     else process.env.CLAUDE_PROXY_SONNET_MODEL = originalSonnetModel
+    if (originalMeridianSonnetModel === undefined) delete process.env.MERIDIAN_SONNET_MODEL
+    else process.env.MERIDIAN_SONNET_MODEL = originalMeridianSonnetModel
+    if (originalOpusModel === undefined) delete process.env.CLAUDE_PROXY_OPUS_MODEL
+    else process.env.CLAUDE_PROXY_OPUS_MODEL = originalOpusModel
+    if (originalMeridianOpusModel === undefined) delete process.env.MERIDIAN_OPUS_MODEL
+    else process.env.MERIDIAN_OPUS_MODEL = originalMeridianOpusModel
     resetCachedClaudeAuthStatus()
   })
 
-  it("maps opus 4.6 models to opus[1m]", () => {
-    expect(mapModelToClaudeModel("claude-opus-4-6")).toBe("opus[1m]")
-    expect(mapModelToClaudeModel("opus")).toBe("opus[1m]")
+  it("maps opus models to base opus by default", () => {
+    expect(mapModelToClaudeModel("claude-opus-4-6")).toBe("opus")
+    expect(mapModelToClaudeModel("opus")).toBe("opus")
+  })
+
+  it("respects explicit opus[1m] override when opted in", () => {
+    process.env.MERIDIAN_OPUS_MODEL = "opus[1m]"
+    expect(mapModelToClaudeModel("claude-opus-4-6", "max")).toBe("opus[1m]")
+    expect(mapModelToClaudeModel("opus", "max")).toBe("opus[1m]")
   })
 
   it("maps opus 4.5 models to opus (no 1M)", () => {
@@ -84,10 +99,9 @@ describe("mapModelToClaudeModel", () => {
       expect(mapModelToClaudeModel("claude-haiku-4-5", "max", "subagent")).toBe("haiku")
     })
 
-    it("primary agents get opus[1m] but sonnet (200k) for max subscription", () => {
-      // Opus [1m] is included with Max; Sonnet [1m] requires Extra Usage
+    it("primary agents get base opus and base sonnet by default", () => {
       expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "primary")).toBe("sonnet")
-      expect(mapModelToClaudeModel("claude-opus-4-6", "max", "primary")).toBe("opus[1m]")
+      expect(mapModelToClaudeModel("claude-opus-4-6", "max", "primary")).toBe("opus")
     })
 
     it("null or missing agentMode behaves as primary", () => {
@@ -185,6 +199,7 @@ describe("Extra Usage cooldown", () => {
   })
 
   it("opus[1m] also skips [1m] during cooldown", () => {
+    process.env.MERIDIAN_OPUS_MODEL = "opus[1m]"
     recordExtendedContextUnavailable()
     expect(mapModelToClaudeModel("claude-opus-4-6", "max")).toBe("opus")
   })

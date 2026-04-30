@@ -82,14 +82,15 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
   // Using the base model preserves rate limit budget for the primary agent.
   const isSubagent = agentMode === "subagent"
 
-  // Opus [1m]: included with Max, Team, and Enterprise subscriptions per
-  // Anthropic docs (https://code.claude.com/docs/en/model-config#extended-context).
-  // Safe to default to [1m] for Max users — no Extra Usage charges.
-  // NOTE: There is a known upstream bug (anthropics/claude-code#39841) where
-  // Claude Code currently gates opus[1m] behind Extra Usage even on Max.
-  // We follow the documented behavior; the bug is Anthropic's to fix.
+  // Opus [1m] is documented as included on Max/Team/Enterprise, but Claude Code
+  // can still gate it behind Extra Usage. Keep the default on base opus and let
+  // users opt in explicitly, matching Sonnet's surprise-billing protection.
   if (model.includes("opus")) {
-    if (use1m && !isSubagent && !isExtendedContextKnownUnavailable()) return "opus[1m]"
+    const opusOverride = process.env.MERIDIAN_OPUS_MODEL ?? process.env.CLAUDE_PROXY_OPUS_MODEL
+    if (opusOverride === "opus[1m]") {
+      if (!use1m || isSubagent || isExtendedContextKnownUnavailable()) return "opus"
+      return "opus[1m]"
+    }
     return "opus"
   }
 
