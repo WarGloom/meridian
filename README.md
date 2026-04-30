@@ -153,7 +153,7 @@ The Claude Code SDK provides programmatic access to Claude. But your favorite co
 - **Session management** — conversations persist across requests, survive compaction and undo, resume after proxy restarts
 - **Streaming** — full SSE streaming with MCP tool filtering
 - **Concurrent sessions** — run parent and subagent requests in parallel
-- **Subagent model selection** — primary agents get 1M context; subagents get 200k, preserving rate-limit budget
+- **Subagent model selection** — extended-context opt-ins stay on primary agents; subagents use base models to preserve rate-limit budget
 - **Auto token refresh** — expired OAuth tokens are refreshed automatically; requests continue without interruption
 - **Passthrough mode** — forward tool calls to the client instead of executing internally
 - **Multimodal** — images, documents, file attachments, and multimodal tool results pass through to Claude
@@ -296,7 +296,7 @@ meridian setup
 This adds the Meridian plugin to your OpenCode global config (`~/.config/opencode/opencode.json`). The plugin enables:
 
 - **Session tracking** — reliable conversation continuity across requests
-- **Safe model defaults** — Opus uses 1M context (included with Max subscription); Sonnet uses 200k to avoid Extra Usage charges ([details](#configuration))
+- **Safe model defaults** — Opus and Sonnet use 200k context by default to avoid Extra Usage gates; 1M context is explicit opt-in ([details](#configuration))
 - **Subagent model selection** — subagents automatically use `sonnet`/`opus` (200k), preserving rate-limit budget
 
 If the plugin is missing, Meridian warns at startup and reports `"plugin": "not-configured"` in the health endpoint.
@@ -336,8 +336,8 @@ Add a provider to `~/.config/crush/crush.json`:
       "base_url": "http://127.0.0.1:3456",
       "api_key": "dummy",
       "models": [
-        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (1M)", "context_window": 1000000, "default_max_tokens": 64000, "can_reason": true, "supports_attachments": true },
-        { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6 (1M)",   "context_window": 1000000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (Meridian)", "context_window": 200000, "default_max_tokens": 64000, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6 (Meridian)",   "context_window": 200000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
         { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "context_window": 200000, "default_max_tokens": 16384, "can_reason": true, "supports_attachments": true }
       ]
     }
@@ -637,6 +637,7 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `MERIDIAN_IDLE_TIMEOUT_SECONDS` | `CLAUDE_PROXY_IDLE_TIMEOUT_SECONDS` | `120` | HTTP keep-alive timeout |
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
+| `MERIDIAN_OPUS_MODEL` | `CLAUDE_PROXY_OPUS_MODEL` | `opus` | Opus context tier: `opus` (200k, default) or `opus[1m]` (1M, opt-in due Claude Code Extra Usage gating) |
 | `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†) |
 | `MERIDIAN_DEFAULT_AGENT` | — | `opencode` | Default adapter for unrecognized agents: `opencode`, `forgecode`, `pi`, `crush`, `droid`, `passthrough`. Requires restart. |
 | `MERIDIAN_PROFILES` | — | unset | JSON array of profile configs (overrides disk discovery). See [Multi-Profile Support](#multi-profile-support). |
@@ -646,7 +647,7 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `MERIDIAN_TELEMETRY_RETENTION_DAYS` | — | `7` | Days to retain telemetry data before cleanup |
 | `MERIDIAN_DEFAULT_PROFILE` | — | *(first profile)* | Default profile ID when no header is sent |
 
-†Sonnet 1M requires Extra Usage on all plans including Max ([docs](https://code.claude.com/docs/en/model-config#extended-context)). Opus 1M is included with Max/Team/Enterprise at no extra cost.
+†Sonnet 1M requires Extra Usage on all plans including Max ([docs](https://code.claude.com/docs/en/model-config#extended-context)). Opus 1M is documented as included with Max/Team/Enterprise, but Claude Code may still gate it behind Extra Usage, so Meridian defaults to base Opus unless you opt in.
 
 ## Endpoints
 
@@ -802,7 +803,7 @@ curl -X POST http://127.0.0.1:3456/auth/refresh
 ```
 
 **I'm hitting rate limits on 1M context. What do I do?**
-Meridian defaults Sonnet to 200k context because Sonnet 1M is always billed as Extra Usage on Max plans — even when regular usage isn't exhausted. This is [Anthropic's intended billing model](https://code.claude.com/docs/en/model-config#extended-context), not a bug. Set `MERIDIAN_SONNET_MODEL=sonnet[1m]` to opt in if you have Extra Usage enabled and understand the billing implications. Opus defaults to 1M context, which is included with Max/Team/Enterprise subscriptions at no extra cost. Note: there is a [known upstream bug](https://github.com/anthropics/claude-code/issues/39841) where Claude Code incorrectly gates Opus 1M behind Extra Usage on Max — this is Anthropic's to fix.
+Meridian defaults Sonnet and Opus to 200k context to avoid Claude Code Extra Usage gates. Sonnet 1M is always billed as Extra Usage on Max plans, and Claude Code can also gate Opus 1M despite documentation saying it is included for Max/Team/Enterprise. Set `MERIDIAN_SONNET_MODEL=sonnet[1m]` or `MERIDIAN_OPUS_MODEL=opus[1m]` only if you have Extra Usage enabled and understand the billing implications.
 
 **Why does the health endpoint show `"plugin": "not-configured"`?**
 You haven't run `meridian setup`. Without the plugin, OpenCode requests won't have session tracking or subagent model selection. Run `meridian setup` and restart OpenCode.
