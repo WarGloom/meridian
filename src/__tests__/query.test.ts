@@ -109,13 +109,15 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp).toBeDefined()
     expect(sp.type).toBe("preset")
-    expect(sp.append).toBe("Be helpful")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("uses raw system prompt in passthrough mode", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Be helpful")
+    expect(sp).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("omits system prompt when empty", () => {
@@ -126,6 +128,18 @@ describe("buildQueryOptions", () => {
   it("includes resume session ID when provided", () => {
     const result = buildQueryOptions(makeContext({ resumeSessionId: "sdk-123" }))
     expect((result.options as any).resume).toBe("sdk-123")
+  })
+
+  it("does not repeat client system context on SDK resume", () => {
+    const result = buildQueryOptions(makeContext({
+      resumeSessionId: "sdk-123",
+      systemContext: "Agent instructions",
+    }))
+    const sp = (result.options as any).systemPrompt
+    expect((result.options as any).resume).toBe("sdk-123")
+    expect(sp.type).toBe("preset")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toBe("Hello")
   })
 
   it("omits resume when not provided", () => {
@@ -231,7 +245,8 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toBe("Be helpful")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("uses preset with append in passthrough + settingSources", () => {
@@ -243,7 +258,8 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toBe("Be helpful")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("uses bare preset when settingSources set but no systemContext", () => {
@@ -304,7 +320,8 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toBe("Agent instructions")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("skips preset when codeSystemPrompt is false in normal mode", () => {
@@ -314,7 +331,8 @@ describe("buildQueryOptions", () => {
       codeSystemPrompt: false,
     }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Agent instructions")
+    expect(sp).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("omits systemPrompt entirely when codeSystemPrompt false and no systemContext", () => {
@@ -344,6 +362,7 @@ describe("buildQueryOptions", () => {
       clientSystemPrompt: false,
     }))
     expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).not.toContain("client-system-instructions")
   })
 
   it("includes client prompt when clientSystemPrompt is true (default)", () => {
@@ -352,7 +371,8 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPrompt: true,
     }))
-    expect((result.options as any).systemPrompt).toBe("Agent instructions")
+    expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("all three controls work together: preset + client + settingSources", () => {
@@ -365,7 +385,8 @@ describe("buildQueryOptions", () => {
     }))
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
-    expect(sp.append).toBe("Agent instructions")
+    expect(sp.append).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
     const opts = result.options as any
     expect(opts.settingSources).toEqual(["user", "project"])
   })
@@ -377,5 +398,6 @@ describe("buildQueryOptions", () => {
       clientSystemPrompt: false,
     }))
     expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).not.toContain("client-system-instructions")
   })
 })

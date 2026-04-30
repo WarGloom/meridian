@@ -6,7 +6,6 @@
  */
 
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
-import { assistantMessage } from "./helpers"
 
 let capturedQueryParams: any = null
 
@@ -249,7 +248,7 @@ describe("Multimodal content", () => {
     }
   })
 
-  it("should pass system context via systemPrompt option, not in structured messages", async () => {
+  it("should prepend system context as a structured message", async () => {
     const app = createTestApp()
     await (await post(app, {
       model: "claude-sonnet-4-5",
@@ -265,11 +264,10 @@ describe("Multimodal content", () => {
       }],
     })).json()
 
-    // System context should be in SDK option, not injected as a structured message
+    // Client system context is not sent through the SDK systemPrompt field.
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: "You are a helpful assistant.",
     })
 
     const messages: any[] = []
@@ -277,11 +275,11 @@ describe("Multimodal content", () => {
       messages.push(msg)
     }
 
-    // No message should contain the system context (it's in the SDK option now)
+    // The first structured message carries the client system context.
     const hasSystemMsg = messages.some((m: any) =>
       typeof m.message.content === "string" && m.message.content.includes("You are a helpful assistant.")
     )
-    expect(hasSystemMsg).toBe(false)
+    expect(hasSystemMsg).toBe(true)
   })
 
   it("should fall back to text prompt with image placeholder when no multimodal", async () => {
