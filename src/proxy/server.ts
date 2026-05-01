@@ -401,6 +401,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             400
           )
         }
+        // Empty messages array would crash sdkUuidMap allocation downstream
+        // (`new Array(-1)` throws RangeError) and is invalid per the Anthropic
+        // API spec ("messages must contain at least one message"). Reject
+        // explicitly with a clear error rather than letting the request fail
+        // with a cryptic 500. See issue #450.
+        if (body.messages.length === 0) {
+          return c.json(
+            { type: "error", error: { type: "invalid_request_error", message: "messages: Cannot be empty — at least one message is required" } },
+            400
+          )
+        }
 
         // Resolve profile: header > active > default > first configured
         const profile = resolveProfile(
@@ -896,9 +907,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // Build SDK UUID map: start with previously stored UUIDs (if resuming),
           // then capture new ones from the response. Declared outside try so
           // storeSession (in the finally/after block) can access it.
+          // Start empty when there's no cached session — the while-loop below
+          // pads to allMessages.length. Previously initialized as
+          // `new Array(allMessages.length - 1).fill(null)` which threw
+          // RangeError when allMessages.length was 0. Cold-start requests
+          // are now also rejected at the entrypoint (#450) but the defensive
+          // initializer keeps any future reentry safe.
           const sdkUuidMap: Array<string | null> = cachedSession?.sdkMessageUuids
             ? [...cachedSession.sdkMessageUuids]
-            : new Array(allMessages.length - 1).fill(null)
+            : []
           // Pad to current message count (the last user message has no UUID yet)
           while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
@@ -1132,6 +1149,19 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   lastStopReason = message.message.stop_reason
                 }
               }
+              // The SDK emits a `result` message at the end of every non-streaming
+              // request with the authoritative aggregate usage across all internal
+              // iterations (top-level output_tokens is the sum, plus an
+              // iterations[] breakdown). The per-assistant-message usage only
+              // reports the LAST iteration's snapshot — which produces visibly
+              // wrong output_tokens (typically 1) for any non-trivial response.
+              // Prefer the result usage when present. See issue #449.
+              if (message.type === "result") {
+                const resultUsage = (message as { usage?: unknown }).usage as TokenUsage | undefined
+                if (resultUsage) {
+                  lastUsage = { ...lastUsage, ...resultUsage }
+                }
+              }
             }
 
             claudeLog("upstream.completed", {
@@ -1351,10 +1381,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               }
             }
 
-            // Build SDK UUID map for the streaming path (declared before try for storeSession access)
+            // Build SDK UUID map for the streaming path (declared before try for storeSession access).
+            // Defensive: start empty so allMessages.length === 0 doesn't crash the
+            // ReadableStream's start() with `RangeError: Invalid array length`.
+            // Cold-start requests with no messages are also rejected upstream now (#450).
             const sdkUuidMap: Array<string | null> = cachedSession?.sdkMessageUuids
               ? [...cachedSession.sdkMessageUuids]
-              : new Array(allMessages.length - 1).fill(null)
+              : []
             while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
             let messageStartEmitted = false
