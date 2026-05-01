@@ -6,6 +6,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { rateLimitStore } from "./rateLimitStore"
+import { fetchOAuthUsage } from "./oauthUsage"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
 import { envBool } from "../env"
@@ -41,11 +42,12 @@ import { LRUMap } from "../utils/lruMap"
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { classifyError, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
+import { classifyError, extractSdkTermination, formatSdkTermination, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDefaults, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
-import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, translateAnthropicSseEvent, buildModelList } from "./openai"
+import type { AnthropicSseEvent } from "./openai"
+import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, buildModelList, createSseTranslator } from "./openai"
 import { extractAdvisorModel, getLastUserMessage, stripAdvisorTools } from "./messages"
 import { requireAuth, authEnabled } from "./auth"
 import { detectAdapter } from "./adapters/detect"
@@ -855,9 +857,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   name: toolName,
                   input: toolInput,
                 })
+                // The reason text is read by the model as the "tool result" of
+                // a denied call. With a vague reason ("Forwarding to client for
+                // execution") modern Claude tends to retry with a different
+                // tool, burning the maxTurns budget. Be explicit that the call
+                // succeeded externally and that the model should stop here —
+                // see telemetry for the failure mode this addresses.
                 return {
                   decision: "block" as const,
-                  reason: "Forwarding to client for execution",
+                  reason:
+                    "This tool call has been forwarded to the client for execution. " +
+                    "The result will be delivered in a future turn. " +
+                    "Do not retry, do not call additional tools, and do not generate further text — end your turn now.",
                 }
               }],
             }],
@@ -1348,6 +1359,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
             let messageStartEmitted = false
             let lastUsage: TokenUsage | undefined
+            // Hoisted out of the inner streaming loop so the outer catch can
+            // dedupe captured tool_uses against what was already forwarded
+            // when recovering gracefully from max_turns (see catch below).
+            const streamedToolUseIds = new Set<string>()
 
             try {
               let currentSessionId: string | undefined
@@ -1517,7 +1532,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // the key-value pair may span multiple deltas, preventing regex match.
               const taskToolBlockIndices = new Set<number>()
               const taskToolJsonBuffer = new Map<number, string>()
-              const streamedToolUseIds = new Set<string>()
 
               // Block index remapping: the SDK resets indices on each turn, but
               // we skip intermediate message_start/stop so the client sees one
@@ -1974,6 +1988,158 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const streamErr = classifyError(errMsg)
               claudeLog("proxy.anthropic.error", { error: errMsg, classified: streamErr.type })
 
+              // Surface the SDK termination reason (max_turns / process_exit / aborted)
+              // and stderr tail to /telemetry/logs?category=error so failures are
+              // visible without trawling raw log files.
+              const sdkTerm = extractSdkTermination(errMsg)
+
+              // Graceful recovery: when max_turns hits in passthrough mode but
+              // we already captured tool_use blocks, the client has actionable
+              // content — they received the tool_use blocks via SSE before the
+              // budget was exhausted. Convert the failure into a clean
+              // stop_reason="tool_use" response so the client executes the
+              // tools and drives the next turn (the same outcome as a normal
+              // tool-use cycle). Without this, the client sees a 500 even
+              // though we already streamed everything it needs.
+              const canRecoverAsToolUse =
+                sdkTerm.reason === "max_turns" &&
+                passthrough &&
+                capturedToolUses.length > 0 &&
+                messageStartEmitted
+
+              if (canRecoverAsToolUse) {
+                // Log the recovery at session level (not error) — it's a
+                // notable flow control event but not a failure for the client.
+                diagnosticLog.session(
+                  `${requestMeta.requestId} sdk_termination_recovered ${formatSdkTermination(sdkTerm, {
+                    model,
+                    requestSource,
+                    isResume,
+                    hasDeferredTools,
+                    sdkSessionId: resumeSessionId,
+                  })} captured=${capturedToolUses.length}`,
+                  requestMeta.requestId,
+                )
+
+                // Mirror the success-path emission: send any unseen tool_uses
+                // (dedup against streamedToolUseIds), then a clean
+                // message_delta with stop_reason="tool_use" + message_stop.
+                const unseenToolUses = capturedToolUses.filter(tu => !streamedToolUseIds.has(tu.id))
+                for (let i = 0; i < unseenToolUses.length; i++) {
+                  const tu = unseenToolUses[i]!
+                  const blockIndex = eventsForwarded + i
+                  safeEnqueue(encoder.encode(
+                    `event: content_block_start\ndata: ${JSON.stringify({
+                      type: "content_block_start",
+                      index: blockIndex,
+                      content_block: { type: "tool_use", id: tu.id, name: tu.name, input: {} }
+                    })}\n\n`
+                  ), "recover_tool_block_start")
+                  safeEnqueue(encoder.encode(
+                    `event: content_block_delta\ndata: ${JSON.stringify({
+                      type: "content_block_delta",
+                      index: blockIndex,
+                      delta: { type: "input_json_delta", partial_json: JSON.stringify(tu.input) }
+                    })}\n\n`
+                  ), "recover_tool_input")
+                  safeEnqueue(encoder.encode(
+                    `event: content_block_stop\ndata: ${JSON.stringify({
+                      type: "content_block_stop",
+                      index: blockIndex
+                    })}\n\n`
+                  ), "recover_tool_block_stop")
+                }
+                safeEnqueue(encoder.encode(
+                  `event: message_delta\ndata: ${JSON.stringify({
+                    type: "message_delta",
+                    delta: { stop_reason: "tool_use", stop_sequence: null },
+                    usage: { output_tokens: 0 }
+                  })}\n\n`
+                ), "recover_message_delta")
+                safeEnqueue(encoder.encode(
+                  `event: message_stop\ndata: {"type":"message_stop"}\n\n`
+                ), "recover_message_stop")
+
+                // Record as success — the client got a usable response.
+                const recoverTotalMs = Date.now() - requestStartAt
+                const recoverQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
+                telemetryStore.record({
+                  requestId: requestMeta.requestId,
+                  timestamp: Date.now(),
+                  adapter: adapter.name,
+                  requestSource,
+                  model,
+                  requestModel: body.model || undefined,
+                  mode: "stream",
+                  isResume,
+                  isPassthrough: passthrough,
+                  hasDeferredTools,
+                  deferredToolCount: hasDeferredTools ? deferredToolCount : undefined,
+                  toolCount,
+                  lineageType,
+                  messageCount: allMessages.length,
+                  sdkSessionId: resumeSessionId,
+                  status: 200,
+                  queueWaitMs: recoverQueueWaitMs,
+                  proxyOverheadMs: upstreamStartAt - requestStartAt - recoverQueueWaitMs,
+                  ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
+                  upstreamDurationMs: Date.now() - upstreamStartAt,
+                  totalDurationMs: recoverTotalMs,
+                  contentBlocks: eventsForwarded + unseenToolUses.length,
+                  textEvents: textEventsForwarded,
+                  error: null,
+                })
+
+                if (!streamClosed) {
+                  try { controller.close() } catch {}
+                  streamClosed = true
+                }
+                return
+              }
+
+              diagnosticLog.error(
+                `${requestMeta.requestId} ${formatSdkTermination(sdkTerm, {
+                  model,
+                  requestSource,
+                  isResume,
+                  hasDeferredTools,
+                  sdkSessionId: resumeSessionId,
+                })}`,
+                requestMeta.requestId,
+              )
+
+              // Record the failed request in the telemetry store. Without this,
+              // streaming errors would not appear in /telemetry/requests at all
+              // (the success path's record call never runs when this catch fires).
+              const streamErrTotalMs = Date.now() - requestStartAt
+              const streamErrQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
+              telemetryStore.record({
+                requestId: requestMeta.requestId,
+                timestamp: Date.now(),
+                adapter: adapter.name,
+                requestSource,
+                model,
+                requestModel: body.model || undefined,
+                mode: "stream",
+                isResume,
+                isPassthrough: passthrough,
+                hasDeferredTools,
+                deferredToolCount: hasDeferredTools ? deferredToolCount : undefined,
+                toolCount,
+                lineageType,
+                messageCount: allMessages.length,
+                sdkSessionId: resumeSessionId,
+                status: streamErr.status,
+                queueWaitMs: streamErrQueueWaitMs,
+                proxyOverheadMs: upstreamStartAt - requestStartAt - streamErrQueueWaitMs,
+                ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
+                upstreamDurationMs: Date.now() - upstreamStartAt,
+                totalDurationMs: streamErrTotalMs,
+                contentBlocks: eventsForwarded,
+                textEvents: textEventsForwarded,
+                error: streamErr.type,
+              })
+
               // If we already emitted message_start, close the message cleanly so
               // clients that access usage.input_tokens don't crash on the incomplete response.
               if (messageStartEmitted) {
@@ -2021,6 +2187,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const classified = classifyError(errMsg)
 
         claudeLog("proxy.error", { error: errMsg, classified: classified.type })
+
+        // Surface the SDK termination reason. Outer-catch context is limited —
+        // model/isResume/etc. may not be assigned yet if the error fired early —
+        // so include only the request-source header (resolved before any work).
+        const sdkTerm = extractSdkTermination(errMsg)
+        diagnosticLog.error(
+          `${requestMeta.requestId} ${formatSdkTermination(sdkTerm, {
+            requestSource: c.req.header("x-meridian-source")?.slice(0, 64) || undefined,
+          })}`,
+          requestMeta.requestId,
+        )
 
         const errorQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
         telemetryStore.record({
@@ -2317,9 +2494,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const created = Math.floor(Date.now() / 1000)
     const model = (typeof rawBody.model === "string" && rawBody.model) ? rawBody.model : "claude-sonnet-4-6"
 
+    // Resolve SDK features for this request (thinking passthrough setting)
+    const { getFeaturesForAdapter } = require("./sdkFeatures") as typeof import("./sdkFeatures")
+    const adapter = detectAdapter(c)
+    const sdkFeatures = getFeaturesForAdapter(adapter.name)
+
     if (!anthropicBody.stream) {
       const anthropicRes = await internalRes.json() as Record<string, unknown>
-      return c.json(translateAnthropicToOpenAi(anthropicRes, completionId, model, created))
+      return c.json(translateAnthropicToOpenAi(anthropicRes, completionId, model, created, {
+        thinkingPassthrough: sdkFeatures.thinkingPassthrough
+      }))
     }
 
     // Streaming: translate Anthropic SSE events to OpenAI SSE chunks
@@ -2332,6 +2516,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const decoder = new TextDecoder()
         let buffer = ""
         let streamError: Error | null = null
+
+        const translate = createSseTranslator({ completionId, model, created, thinkingPassthrough: sdkFeatures.thinkingPassthrough })
 
         try {
           while (true) {
@@ -2352,7 +2538,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               catch { continue }
               if (typeof event.type !== "string") continue
 
-              const chunk = translateAnthropicSseEvent(event as { type: string } & Record<string, unknown>, completionId, model, created)
+              const chunk = translate(event as unknown as AnthropicSseEvent)
               if (chunk) controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
             }
           }
@@ -2395,14 +2581,62 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   //
   // Returns 200 with `buckets: []` if no events have been observed yet (first
   // call after proxy restart).
-  app.get("/v1/usage/quota", (c) => {
+  app.get("/v1/usage/quota", async (c) => {
+    // Two data sources, merged:
+    //   - OAuth usage API (continuous % via Anthropic's private endpoint,
+    //     profile-scoped — reads credentials from the active profile's
+    //     CLAUDE_CONFIG_DIR so multi-account setups don't cross-contaminate).
+    //   - SDK rate_limit_event store (overage info, threshold-gated %).
+    //
+    // Strategy: build a bucket per known type. OAuth-sourced fields
+    // (`utilization`, `resetsAt`) win when present — they're always
+    // populated. SDK fields fill in overage details and any bucket types
+    // OAuth doesn't expose.
+    //
     // Filter out the internal "default" bucket — it's a Meridian-side
     // fallback for SDK events missing `rateLimitType`, not a real Anthropic
     // bucket that consumers can render.
-    const entries = rateLimitStore.getAll().filter(entry => entry.rateLimitType !== undefined)
-    return c.json({
-      buckets: entries.map(entry => ({
-        type: entry.rateLimitType,
+    const sdkEntries = rateLimitStore.getAll().filter(entry => entry.rateLimitType !== undefined)
+
+    // Determine which profile we're querying:
+    //   1. Explicit ?profile=<id> query param
+    //   2. Active profile (set via UI / POST /profiles/active)
+    //   3. First configured profile
+    //   4. Default OAuth account (no claudeConfigDir override)
+    const requestedProfile = c.req.query("profile")
+    const profilesList = getEffectiveProfiles(finalConfig.profiles)
+    const targetProfileId = requestedProfile
+      || getActiveProfileId()
+      || finalConfig.defaultProfile
+      || profilesList[0]?.id
+      || null
+    const targetProfile = targetProfileId ? profilesList.find(p => p.id === targetProfileId) : undefined
+
+    const oauth = await fetchOAuthUsage({
+      profileId: targetProfileId ?? undefined,
+      claudeConfigDir: targetProfile?.claudeConfigDir,
+    })
+
+    type Bucket = {
+      type: string
+      status: "allowed" | "allowed_warning" | "rejected"
+      utilization: number | null
+      resetsAt: number | null
+      isUsingOverage: boolean
+      overageStatus: string | null
+      overageResetsAt: number | null
+      overageDisabledReason: string | null
+      surpassedThreshold: number | null
+      observedAt: number
+    }
+
+    const byType = new Map<string, Bucket>()
+
+    // Seed with SDK-sourced buckets (provides overage details).
+    for (const entry of sdkEntries) {
+      const type = entry.rateLimitType as string
+      byType.set(type, {
+        type,
         status: entry.status,
         utilization: entry.utilization ?? null,
         resetsAt: entry.resetsAt ?? null,
@@ -2412,7 +2646,108 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         overageDisabledReason: entry.overageDisabledReason ?? null,
         surpassedThreshold: entry.surpassedThreshold ?? null,
         observedAt: entry.observedAt,
-      })),
+      })
+    }
+
+    // Overlay OAuth-sourced buckets — these always have current % when
+    // available. Keep SDK overage fields if we already have them.
+    if (oauth) {
+      for (const w of oauth.windows) {
+        const existing = byType.get(w.type)
+        const status: Bucket["status"] =
+          (w.utilization ?? 0) >= 1 ? "rejected" :
+          (w.utilization ?? 0) >= 0.8 ? "allowed_warning" :
+          "allowed"
+        byType.set(w.type, {
+          type: w.type,
+          status: existing?.status === "rejected" ? "rejected" : status,
+          utilization: w.utilization ?? existing?.utilization ?? null,
+          resetsAt: w.resetsAt ?? existing?.resetsAt ?? null,
+          isUsingOverage: existing?.isUsingOverage ?? false,
+          overageStatus: existing?.overageStatus ?? null,
+          overageResetsAt: existing?.overageResetsAt ?? null,
+          overageDisabledReason: existing?.overageDisabledReason ?? null,
+          surpassedThreshold: existing?.surpassedThreshold ?? null,
+          observedAt: oauth.fetchedAt,
+        })
+      }
+    }
+
+    return c.json({
+      profile: targetProfileId ?? null,
+      buckets: Array.from(byType.values()),
+      extraUsage: oauth?.extraUsage ?? null,
+      sources: {
+        oauth: oauth ? { fetchedAt: oauth.fetchedAt } : null,
+        sdk: { entryCount: sdkEntries.length },
+      },
+      asOf: Date.now(),
+    })
+  })
+
+  // All-profiles aggregate — returns OAuth usage for every configured profile
+  // in parallel, each with its own per-profile cache. Used by the Meridian
+  // settings UI to render a multi-account usage panel.
+  //
+  // Pylon and other single-profile clients should keep using `/v1/usage/quota`
+  // (which returns only the active profile's data).
+  //
+  // Each profile entry includes the same shape as `/v1/usage/quota`'s top
+  // level (windows + extraUsage), or `error: "no_token" | "upstream_error"`
+  // when the fetch failed for that profile.
+  app.get("/v1/usage/quota/all", async (c) => {
+    const profilesList = getEffectiveProfiles(finalConfig.profiles)
+    const activeId = getActiveProfileId() || finalConfig.defaultProfile || profilesList[0]?.id || null
+
+    if (profilesList.length === 0) {
+      // Single-account mode — just return the default OAuth account's data.
+      const oauth = await fetchOAuthUsage({})
+      return c.json({
+        profiles: [{
+          id: "default",
+          isActive: true,
+          windows: oauth?.windows ?? [],
+          extraUsage: oauth?.extraUsage ?? null,
+          fetchedAt: oauth?.fetchedAt ?? null,
+          error: oauth ? null : "no_token",
+        }],
+        activeProfile: "default",
+        asOf: Date.now(),
+      })
+    }
+
+    const results = await Promise.all(profilesList.map(async (p) => {
+      // Skip API-key profiles — OAuth usage endpoint only applies to Claude Max OAuth.
+      const type = p.type ?? "claude-max"
+      if (type !== "claude-max") {
+        return {
+          id: p.id,
+          isActive: p.id === activeId,
+          type,
+          windows: [] as any[],
+          extraUsage: null,
+          fetchedAt: null,
+          error: "not_oauth" as const,
+        }
+      }
+      const oauth = await fetchOAuthUsage({
+        profileId: p.id,
+        claudeConfigDir: p.claudeConfigDir,
+      })
+      return {
+        id: p.id,
+        isActive: p.id === activeId,
+        type,
+        windows: oauth?.windows ?? [],
+        extraUsage: oauth?.extraUsage ?? null,
+        fetchedAt: oauth?.fetchedAt ?? null,
+        error: oauth ? null : "no_token",
+      }
+    }))
+
+    return c.json({
+      profiles: results,
+      activeProfile: activeId,
       asOf: Date.now(),
     })
   })
