@@ -442,12 +442,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         // Strip env vars that would cause the SDK subprocess to loop back through
         // the proxy instead of using its native Claude Max auth. Also strip vars
-        // that cause unwanted SDK plugin/feature loading.
+        // that cause unwanted SDK plugin/feature loading or expose Claude-Code-
+        // host-only tools that downstream agents (OpenCode, Crush, Droid, etc.)
+        // cannot execute.
         const {
-          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+          // Strips infinite loop / wrong-auth conditions:
           ANTHROPIC_API_KEY: _dropApiKey,
           ANTHROPIC_BASE_URL: _dropBaseUrl,
           ANTHROPIC_AUTH_TOKEN: _dropAuthToken,
+          // Strips unwanted SDK plugin/feature loading:
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+          // Strips Claude-Code-only tools that other agents can't execute.
+          // CLAUDE_CODE_USE_POWERSHELL_TOOL=1 makes the SDK register a
+          // `PowerShell` tool the model can call. OpenCode (and other clients)
+          // expose `bash` instead and reject `PowerShell` as an unavailable
+          // tool. Setting it to "0" doesn't help — the var has to be removed
+          // entirely. See issue #441.
+          CLAUDE_CODE_USE_POWERSHELL_TOOL: _dropUsePowershell,
           ...cleanEnv
         } = process.env
 
@@ -954,7 +965,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, hasDeferredTools,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                     effort, thinking, taskBudget, betas, settingSources,
-                    codeSystemPrompt: sdkFeatures.codeSystemPrompt ? true : undefined, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                    codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                     sdkDebug: sdkFeatures.sdkDebug,
@@ -1001,7 +1012,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, hasDeferredTools,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, betas, settingSources,
-                      codeSystemPrompt: sdkFeatures.codeSystemPrompt ? true : undefined, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                      codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                       sdkDebug: sdkFeatures.sdkDebug,
@@ -1422,7 +1433,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, hasDeferredTools,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, betas, settingSources,
-                      codeSystemPrompt: sdkFeatures.codeSystemPrompt ? true : undefined, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                      codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                       sdkDebug: sdkFeatures.sdkDebug,
@@ -1464,7 +1475,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, hasDeferredTools,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, betas, settingSources,
-                        codeSystemPrompt: sdkFeatures.codeSystemPrompt ? true : undefined, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                        codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                         sdkDebug: sdkFeatures.sdkDebug,
@@ -2508,9 +2519,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
     // Route internally via app.fetch() — no network roundtrip.
     // Hono resolves the path in-process; the URL scheme/host are ignored.
+    // Forward the caller's auth headers so requireAuth on /v1/messages accepts
+    // the inner hop when MERIDIAN_API_KEY is set (issue #415).
+    const internalHeaders: Record<string, string> = { "Content-Type": "application/json" }
+    const xApiKey = c.req.header("x-api-key")
+    if (xApiKey) internalHeaders["x-api-key"] = xApiKey
+    const authz = c.req.header("authorization")
+    if (authz) internalHeaders["authorization"] = authz
     const internalReq = new Request("http://internal/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: internalHeaders,
       body: JSON.stringify(anthropicBody),
     })
     const internalRes = await app.fetch(internalReq)
