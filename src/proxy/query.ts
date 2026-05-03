@@ -212,7 +212,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
   const includeClient = clientSystemPrompt ?? true
   const clientContext = buildClientContext(systemContext, includeClient)
-  const promptClientContext = resumeSessionId ? undefined : clientContext
+  const promptClientContext = clientContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 

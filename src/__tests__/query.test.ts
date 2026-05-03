@@ -130,7 +130,7 @@ describe("buildQueryOptions", () => {
     expect((result.options as any).resume).toBe("sdk-123")
   })
 
-  it("does not repeat client system context on SDK resume", () => {
+  it("preserves fresh client system context on SDK resume", () => {
     const result = buildQueryOptions(makeContext({
       resumeSessionId: "sdk-123",
       systemContext: "Agent instructions",
@@ -139,7 +139,7 @@ describe("buildQueryOptions", () => {
     expect((result.options as any).resume).toBe("sdk-123")
     expect(sp.type).toBe("preset")
     expect(sp.append).toBeUndefined()
-    expect(result.prompt).toBe("Hello")
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("omits resume when not provided", () => {

@@ -133,8 +133,11 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
       { role: "user", content: "how are you?" },
     ], "sdk-1", "System v2: file tree has 15 files, 3 diagnostics")
 
-    // MUST resume — fingerprint doesn't include systemContext
+    // MUST resume — fingerprint doesn't include systemContext.
     expect(getCaptured()?.options?.resume).toBe("sdk-1")
+    // Fresh client context must still be sent on the resumed SDK call so
+    // model-specific identity/system text can update across resumes.
+    expect(getCaptured()?.prompt).toContain("System v2: file tree has 15 files, 3 diagnostics")
   })
 
   it("resumes when systemContext changes between requests (stream)", async () => {
