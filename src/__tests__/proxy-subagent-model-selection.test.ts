@@ -43,15 +43,15 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
-// Pass through the real resolveSdkModelDefaults because mock.module is process-global
+// Pass through the real resolveSdkModelDefaults — mock.module is process-global
 // in Bun, and stubbing it as () => ({}) leaks to proxy-env-stripping.test.ts.
 import { resolveSdkModelDefaults } from "../proxy/models"
 
-// Fix auth status so model mapping behavior stays deterministic in this file.
+// Fix auth status so mapModelToClaudeModel always picks the max/1m path
 mock.module("../proxy/models", () => ({
-  mapModelToClaudeModel: (model: string, sub?: string | null, agentMode?: string | null) => {
+  mapModelToClaudeModel: (model: string, _sub?: string | null, agentMode?: string | null) => {
     const base = model.toLowerCase()
-    if (base.includes("opus")) return "opus"
+    if (base.includes("opus")) return agentMode === "subagent" ? "opus" : "opus[1m]"
     if (base.includes("haiku")) return "haiku"
     // Sonnet [1m] requires Extra Usage on Max — default to 200k for all agents
     return "sonnet"
@@ -116,9 +116,9 @@ describe("Subagent model selection", () => {
     expect(capturedModel).toBe("opus")
   })
 
-  it("primary agent with opus gets base opus by default", async () => {
+  it("primary agent with opus gets opus[1m]", async () => {
     await post({ ...BASE_REQUEST, model: "claude-opus-4-6" }, { "x-opencode-agent-mode": "primary" })
-    expect(capturedModel).toBe("opus")
+    expect(capturedModel).toBe("opus[1m]")
   })
 
   it("haiku is unaffected by agent mode", async () => {
