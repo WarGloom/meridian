@@ -43,6 +43,10 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
+// Pass through the real resolveSdkModelDefaults because mock.module is process-global
+// in Bun, and stubbing it as () => ({}) leaks to proxy-env-stripping.test.ts.
+import { resolveSdkModelDefaults } from "../proxy/models"
+
 // Fix auth status so model mapping behavior stays deterministic in this file.
 mock.module("../proxy/models", () => ({
   mapModelToClaudeModel: (model: string, sub?: string | null, agentMode?: string | null) => {
@@ -53,7 +57,7 @@ mock.module("../proxy/models", () => ({
     return "sonnet"
   },
   resolveClaudeExecutableAsync: async () => "claude",
-  resolveSdkModelDefaults: () => ({}),
+  resolveSdkModelDefaults,
   getClaudeAuthStatusAsync: async () => ({ loggedIn: true, subscriptionType: "max" }),
   getAuthCacheInfo: () => ({ lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }),
   hasExtendedContext: (m: string) => m.endsWith("[1m]"),
