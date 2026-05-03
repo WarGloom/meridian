@@ -90,7 +90,7 @@ function supports1mContext(model: string): boolean {
   return true
 }
 
-export function mapModelToClaudeModel(model: string, _subscriptionType?: string | null, agentMode?: string | null): ClaudeModel {
+export function mapModelToClaudeModel(model: string, subscriptionType?: string | null, agentMode?: string | null): ClaudeModel {
   if (model.includes("haiku")) return "haiku"
 
   const use1m = supports1mContext(model)
