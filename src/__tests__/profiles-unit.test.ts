@@ -2,6 +2,8 @@
  * Unit tests for profiles.ts — pure function tests (no mocks needed).
  */
 import { describe, test, expect, beforeEach } from "bun:test"
+import { join } from "node:path"
+import { homedir } from "node:os"
 import {
   resolveProfile,
   listProfiles,
@@ -95,6 +97,72 @@ describe("resolveProfile", () => {
     expect(result.type).toBe("api")
     expect(result.env).toEqual({})
   })
+
+  test("resolves oauth-token profile via explicit type", () => {
+    const result = resolveProfile(
+      [{ id: "ci", type: "oauth-token", oauthToken: "sk-ant-oat01-foo" }],
+      undefined,
+    )
+    expect(result.id).toBe("ci")
+    expect(result.type).toBe("oauth-token")
+    expect(result.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-foo")
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe(
+      join(homedir(), ".config", "meridian", "profiles", "ci"),
+    )
+  })
+
+  test("infers oauth-token type from oauthToken field alone", () => {
+    const result = resolveProfile([{ id: "ci", oauthToken: "sk-ant-oat01-bar" }], undefined)
+    expect(result.id).toBe("ci")
+    expect(result.type).toBe("oauth-token")
+    expect(result.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-bar")
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe(
+      join(homedir(), ".config", "meridian", "profiles", "ci"),
+    )
+  })
+
+  test("oauthToken overrides claudeConfigDir with isolated profile dir", () => {
+    const result = resolveProfile(
+      [{ id: "ci", oauthToken: "sk-ant-oat01-baz", claudeConfigDir: "/ignored" }],
+      undefined,
+    )
+    expect(result.type).toBe("oauth-token")
+    expect(result.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-baz")
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe(
+      join(homedir(), ".config", "meridian", "profiles", "ci"),
+    )
+    expect(result.env.CLAUDE_CONFIG_DIR).not.toBe("/ignored")
+  })
+
+  test("oauth-token type without oauthToken returns empty env", () => {
+    const result = resolveProfile([{ id: "bare-oauth", type: "oauth-token" }], undefined)
+    expect(result.id).toBe("bare-oauth")
+    expect(result.type).toBe("oauth-token")
+    expect(result.env).toEqual({})
+  })
+
+  test("oauth-token isolation dir uses profile id, not 'default'", () => {
+    const result = resolveProfile(
+      [{ id: "my-special-ci", oauthToken: "sk-ant-oat01-aaa" }],
+      undefined,
+    )
+    expect(result.env.CLAUDE_CONFIG_DIR).toContain("/my-special-ci")
+  })
+
+  test("header selects oauth-token profile when active points elsewhere", () => {
+    const mixed: ProfileConfig[] = [
+      { id: "personal", claudeConfigDir: "/c1" },
+      { id: "ci", oauthToken: "sk-ant-oat01-qux" },
+    ]
+    setActiveProfile("personal")
+    const result = resolveProfile(mixed, undefined, "ci")
+    expect(result.id).toBe("ci")
+    expect(result.type).toBe("oauth-token")
+    expect(result.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-qux")
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe(
+      join(homedir(), ".config", "meridian", "profiles", "ci"),
+    )
+  })
 })
 
 describe("listProfiles", () => {
@@ -131,6 +199,14 @@ describe("listProfiles", () => {
   test("defaults type to claude-max when unset", () => {
     const result = listProfiles([{ id: "bare" }], undefined)
     expect(result[0]!.type).toBe("claude-max")
+  })
+
+  test("preserves oauth-token type when explicitly set", () => {
+    const result = listProfiles(
+      [{ id: "ci", type: "oauth-token", oauthToken: "sk-ant-oat01-foo" }],
+      undefined,
+    )
+    expect(result[0]).toEqual({ id: "ci", type: "oauth-token", isActive: true })
   })
 })
 
@@ -198,5 +274,61 @@ describe("profile-scoped session isolation", () => {
     const result = resolveProfile(profiles, undefined, "personal")
     expect(result.id).toBe("personal")
     expect(result.env.CLAUDE_CONFIG_DIR).toBe("/home/.claude")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dirsToRemoveOnProfileRemove — pure helper covering the cleanup paths.
+//
+// Regression target: oauth-token profiles store no `claudeConfigDir` on the
+// profile itself, so the original profileRemove bypassed any dir cleanup and
+// left the SDK-populated isolation dir at PROFILES_DIR/<id> orphaned forever.
+// ---------------------------------------------------------------------------
+describe("dirsToRemoveOnProfileRemove", () => {
+  const PROFILES_DIR = "/tmp/test-profiles-dir"
+
+  test("browser-login profile drops its claudeConfigDir when under PROFILES_DIR", async () => {
+    const { dirsToRemoveOnProfileRemove } = await import("../proxy/profileCli")
+    const dirs = dirsToRemoveOnProfileRemove(
+      { id: "personal", claudeConfigDir: `${PROFILES_DIR}/personal` },
+      PROFILES_DIR,
+    )
+    expect(dirs).toEqual([`${PROFILES_DIR}/personal`])
+  })
+
+  test("never returns a claudeConfigDir outside PROFILES_DIR (refuses to rm-rf foreign paths)", async () => {
+    const { dirsToRemoveOnProfileRemove } = await import("../proxy/profileCli")
+    const dirs = dirsToRemoveOnProfileRemove(
+      { id: "wild", claudeConfigDir: "/home/user/.claude" },
+      PROFILES_DIR,
+    )
+    expect(dirs).toEqual([])
+  })
+
+  test("oauth-token profile drops the pinned isolation dir at PROFILES_DIR/<id>", async () => {
+    const { dirsToRemoveOnProfileRemove } = await import("../proxy/profileCli")
+    const dirs = dirsToRemoveOnProfileRemove(
+      { id: "ci", oauthToken: "sk-ant-oat01-xxx" },
+      PROFILES_DIR,
+    )
+    expect(dirs).toEqual([`${PROFILES_DIR}/ci`])
+  })
+
+  test("explicit type='oauth-token' without oauthToken still drops the isolation dir", async () => {
+    const { dirsToRemoveOnProfileRemove } = await import("../proxy/profileCli")
+    const dirs = dirsToRemoveOnProfileRemove(
+      { id: "bare-ci", type: "oauth-token" },
+      PROFILES_DIR,
+    )
+    expect(dirs).toEqual([`${PROFILES_DIR}/bare-ci`])
+  })
+
+  test("api profile returns no dirs (token lives in profiles.json, no on-disk state)", async () => {
+    const { dirsToRemoveOnProfileRemove } = await import("../proxy/profileCli")
+    const dirs = dirsToRemoveOnProfileRemove(
+      { id: "direct-api", type: "api", apiKey: "sk-ant-api03-..." },
+      PROFILES_DIR,
+    )
+    expect(dirs).toEqual([])
   })
 })

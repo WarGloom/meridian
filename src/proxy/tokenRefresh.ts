@@ -303,6 +303,148 @@ async function doRefresh(store: CredentialStore): Promise<boolean> {
   return true
 }
 
+/**
+ * Refresh the access token if it is within `bufferMs` of expiry.
+ *
+ * Cheap to call before every SDK request: when the token isn't due yet this
+ * is just one credential-store read. When it is due, the underlying
+ * `refreshOAuthToken()` call is in-flight-deduplicated so concurrent callers
+ * share one network round-trip.
+ *
+ * Returns true when the token is fresh after the call (already valid OR
+ * successfully refreshed), false on any failure (no credentials, no
+ * expiresAt, refresh request failed). False is non-fatal — the caller
+ * proceeds with whatever token is on disk and falls back to the reactive
+ * refresh-on-401 path if Anthropic rejects it.
+ */
+export async function ensureFreshToken(
+  store?: CredentialStore,
+  bufferMs = 5 * 60 * 1000,
+): Promise<boolean> {
+  const s = store ?? createPlatformCredentialStore()
+  const credentials = await s.read()
+  const expiresAt = credentials?.claudeAiOauth?.expiresAt
+  if (!expiresAt) return false
+  if (expiresAt - Date.now() > bufferMs) return true
+  return refreshOAuthToken(s)
+}
+
+// ---------------------------------------------------------------------------
+// Background refresh scheduler
+// ---------------------------------------------------------------------------
+
+let scheduledRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let scheduledRefreshActive = false
+// Generation counter — bumped on every start/stop. Each scheduleNext chain
+// captures the generation it began with and re-checks it after every await;
+// if the global generation has moved on, the chain has been superseded and
+// must bail rather than arm a follow-up timer. Without this, a stop()+start()
+// that interleaves with an in-flight read leaves the first chain alive,
+// arming a timer that overwrites scheduledRefreshTimer (so stop() can't
+// clear it) and keeps firing in parallel with the live chain.
+let scheduledRefreshGeneration = 0
+
+/**
+ * Start a self-rescheduling timer that refreshes the access token shortly
+ * before each expiry — regardless of incoming traffic.
+ *
+ * Idempotent: a second call while one is already running is a no-op. Safe to
+ * call from any code path; returns synchronously and schedules in the
+ * background.
+ *
+ * Why traffic-independent matters: without this, an idle proxy never fires
+ * either the proactive (`ensureFreshToken`) or reactive (401-retry) refresh
+ * path. Anthropic's OAuth refresh tokens appear to be invalidated server-side
+ * after sitting unused for an extended period (observed 2026-05-03: two NAS
+ * instances idle past expiry both got `400 invalid_grant` on a manual refresh
+ * attempt; only fix was OAuth-flow re-login). Running a refresh every ~8h
+ * keeps the refresh chain warm.
+ *
+ * On `refreshOAuthToken()` failure (network, transient API error, refresh
+ * token rejected) we retry every `failureRetryMs` — gives operators a window
+ * to `claude login` and have the new tokens picked up automatically on the
+ * next tick.
+ */
+export function startBackgroundRefresh(
+  store?: CredentialStore,
+  bufferMs = 5 * 60 * 1000,
+  failureRetryMs = 5 * 60 * 1000,
+): void {
+  if (scheduledRefreshActive) return
+  scheduledRefreshActive = true
+  const gen = ++scheduledRefreshGeneration
+  void scheduleNext(store ?? createPlatformCredentialStore(), bufferMs, failureRetryMs, gen)
+}
+
+/** Stop the background scheduler. Idempotent. */
+export function stopBackgroundRefresh(): void {
+  scheduledRefreshActive = false
+  scheduledRefreshGeneration++
+  if (scheduledRefreshTimer) clearTimeout(scheduledRefreshTimer)
+  scheduledRefreshTimer = null
+}
+
+async function scheduleNext(
+  store: CredentialStore,
+  bufferMs: number,
+  failureRetryMs: number,
+  gen: number,
+): Promise<void> {
+  if (!scheduledRefreshActive || gen !== scheduledRefreshGeneration) return
+
+  const credentials = await store.read().catch(() => null)
+  if (!scheduledRefreshActive || gen !== scheduledRefreshGeneration) return
+
+  const expiresAt = credentials?.claudeAiOauth?.expiresAt
+
+  if (!expiresAt) {
+    // Operator hasn't logged in yet (no credentials) or credentials are
+    // missing the field. Re-poll periodically — once `claude login` writes
+    // the file, the next tick picks it up.
+    armTimer(failureRetryMs, store, bufferMs, failureRetryMs, gen)
+    return
+  }
+
+  const dueIn = expiresAt - Date.now() - bufferMs
+  if (dueIn <= 0) {
+    // Already due (or past) — fire now, schedule the follow-up based on the
+    // new expiresAt (or retry in failureRetryMs if refresh failed).
+    const ok = await refreshOAuthToken(store)
+    if (!scheduledRefreshActive || gen !== scheduledRefreshGeneration) return
+    claudeLog("token_refresh.scheduled", { ok, immediate: true })
+    console.error(`[token_refresh] scheduled refresh (immediate) ok=${ok}`)
+    armTimer(ok ? 0 : failureRetryMs, store, bufferMs, failureRetryMs, gen)
+    return
+  }
+
+  armTimer(dueIn, store, bufferMs, failureRetryMs, gen)
+}
+
+function armTimer(
+  delayMs: number,
+  store: CredentialStore,
+  bufferMs: number,
+  failureRetryMs: number,
+  gen: number,
+): void {
+  scheduledRefreshTimer = setTimeout(async () => {
+    if (!scheduledRefreshActive || gen !== scheduledRefreshGeneration) return
+    // The dueIn re-check inside scheduleNext distinguishes "fire-now" from
+    // "reschedule-only" ticks: when the disk-state recompute lands inside
+    // the buffer window, scheduleNext emits the immediate-refresh log line;
+    // otherwise it just arms the next timer silently.
+    void scheduleNext(store, bufferMs, failureRetryMs, gen)
+  }, delayMs)
+  if (scheduledRefreshTimer && (scheduledRefreshTimer as { unref?: () => void }).unref) {
+    (scheduledRefreshTimer as { unref: () => void }).unref()
+  }
+}
+
+/** For testing only. */
+export function isBackgroundRefreshActive(): boolean {
+  return scheduledRefreshActive
+}
+
 /** Reset in-flight state — for testing only. */
 export function resetInflightRefresh(): void {
   inflightRefresh = null

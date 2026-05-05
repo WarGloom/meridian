@@ -246,6 +246,319 @@ describe("refreshOAuthToken", () => {
 })
 
 // ---------------------------------------------------------------------------
+// ensureFreshToken — proactive refresh before SDK call
+// ---------------------------------------------------------------------------
+
+describe("ensureFreshToken", () => {
+  let originalFetch: typeof globalThis.fetch
+  beforeEach(() => { originalFetch = globalThis.fetch })
+  afterEach(async () => {
+    globalThis.fetch = originalFetch
+    const { resetInflightRefresh } = await import("../proxy/tokenRefresh")
+    resetInflightRefresh()
+  })
+
+  function makeStoreWithExpiry(expiresAt: number) {
+    return makeStore({ ...MOCK_CREDENTIALS, claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt } })
+  }
+
+  it("returns true without refreshing when token is far from expiry", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.reject(new Error("fetch should not be called")))
+    mockFetch(fetchSpy)
+    const { store, writes } = makeStoreWithExpiry(Date.now() + 60 * 60 * 1000) // +1h, well outside default 5min buffer
+
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(true)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(writes).toHaveLength(0)
+  })
+
+  it("refreshes when token is inside the buffer (near-expiry)", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE)))
+    mockFetch(fetchSpy)
+    const { store, getStored } = makeStoreWithExpiry(Date.now() + 60 * 1000) // +1min, well inside default 5min buffer
+
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(getStored()?.claudeAiOauth.accessToken).toBe("new-access-token")
+  })
+
+  it("refreshes when token is already expired", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE)))
+    mockFetch(fetchSpy)
+    const { store, getStored } = makeStoreWithExpiry(Date.now() - 60 * 60 * 1000) // -1h
+
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(getStored()?.claudeAiOauth.accessToken).toBe("new-access-token")
+  })
+
+  it("returns false when no credentials stored", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.reject(new Error("fetch should not be called")))
+    mockFetch(fetchSpy)
+    const { store } = makeStore(null)
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it("returns false when expiresAt missing", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.reject(new Error("fetch should not be called")))
+    mockFetch(fetchSpy)
+    // expiresAt = 0 is falsy via `!expiresAt`
+    const { store } = makeStoreWithExpiry(0)
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(false)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it("returns false when refresh request fails", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    mockFetch(() => Promise.resolve(new Response("invalid_grant", { status: 400 })))
+    const { store } = makeStoreWithExpiry(Date.now() - 1000)
+    const ok = await ensureFreshToken(store)
+    expect(ok).toBe(false)
+  })
+
+  it("respects custom bufferMs", async () => {
+    const { ensureFreshToken } = await import("../proxy/tokenRefresh")
+    const fetchSpy = mock(() => Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE)))
+    mockFetch(fetchSpy)
+    // Token expires in 2h. Default 5-min buffer → no refresh; 3-h buffer → refresh.
+    const { store } = makeStoreWithExpiry(Date.now() + 2 * 60 * 60 * 1000)
+    expect(await ensureFreshToken(store, 60 * 1000)).toBe(true)            // 1-min buffer: skip
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(await ensureFreshToken(store, 3 * 60 * 60 * 1000)).toBe(true)   // 3-h buffer: refresh
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startBackgroundRefresh — traffic-independent scheduled refresh
+// ---------------------------------------------------------------------------
+
+describe("startBackgroundRefresh", () => {
+  let originalFetch: typeof globalThis.fetch
+  beforeEach(() => { originalFetch = globalThis.fetch })
+  afterEach(async () => {
+    const { stopBackgroundRefresh, resetInflightRefresh } = await import("../proxy/tokenRefresh")
+    stopBackgroundRefresh()
+    resetInflightRefresh()
+    globalThis.fetch = originalFetch
+  })
+
+  // Wait for any pending timers + microtasks to flush. Real timers — keeps
+  // the test runner simple at the cost of slightly longer test runs.
+  const tick = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+  it("immediately refreshes when token is already expired", async () => {
+    const { startBackgroundRefresh, isBackgroundRefreshActive } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE))
+    })
+    const { store, getStored } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 60_000 },
+    })
+
+    startBackgroundRefresh(store, 1000, 60_000)
+    expect(isBackgroundRefreshActive()).toBe(true)
+    await tick(50)
+
+    expect(fetchCalls).toBe(1)
+    expect(getStored()?.claudeAiOauth.accessToken).toBe("new-access-token")
+  })
+
+  it("schedules — does not refresh — when token has time", async () => {
+    const { startBackgroundRefresh } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE))
+    })
+    const { store } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() + 60 * 60 * 1000 }, // +1h
+    })
+
+    startBackgroundRefresh(store, 1000, 60_000)
+    await tick(50)
+
+    expect(fetchCalls).toBe(0)
+  })
+
+  it("polls when no credentials are present, picks up new file on next tick", async () => {
+    const { startBackgroundRefresh, stopBackgroundRefresh } = await import("../proxy/tokenRefresh")
+    let stored: typeof MOCK_CREDENTIALS | null = null
+    const store: CredentialStore = {
+      async read() { return stored ? JSON.parse(JSON.stringify(stored)) : null },
+      async write(c) { stored = c as typeof MOCK_CREDENTIALS; return true },
+    }
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE))
+    })
+
+    startBackgroundRefresh(store, 1000, 30) // 30ms poll interval
+    await tick(50)
+    expect(fetchCalls).toBe(0) // no credentials yet — refresh skipped
+
+    // Operator "logs in" — credentials appear with an expired token
+    stored = {
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 1000 },
+    }
+    await tick(60) // wait for next poll tick
+
+    expect(fetchCalls).toBeGreaterThanOrEqual(1)
+    stopBackgroundRefresh()
+  })
+
+  it("retries on refresh failure", async () => {
+    const { startBackgroundRefresh } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(new Response("invalid_grant", { status: 400 }))
+    })
+    const { store } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 1000 },
+    })
+
+    startBackgroundRefresh(store, 1000, 30) // 30ms retry interval
+    await tick(120) // let it retry a few times
+
+    expect(fetchCalls).toBeGreaterThanOrEqual(2)
+  })
+
+  it("is idempotent — second start() while running is a no-op", async () => {
+    const { startBackgroundRefresh, isBackgroundRefreshActive } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE))
+    })
+    const { store } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 1000 },
+    })
+
+    startBackgroundRefresh(store, 1000, 60_000)
+    startBackgroundRefresh(store, 1000, 60_000) // second call — should be no-op
+    expect(isBackgroundRefreshActive()).toBe(true)
+    await tick(50)
+
+    expect(fetchCalls).toBe(1) // only one refresh, not two
+  })
+
+  it("stop() prevents the next scheduled refresh from firing", async () => {
+    const { startBackgroundRefresh, stopBackgroundRefresh, isBackgroundRefreshActive } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(makeSuccessResponse(MOCK_TOKEN_RESPONSE))
+    })
+    const { store } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() + 1000 }, // 1s out, well past 100ms buffer
+    })
+
+    startBackgroundRefresh(store, 100, 60_000)
+    stopBackgroundRefresh()
+    expect(isBackgroundRefreshActive()).toBe(false)
+    await tick(1500) // would have fired by now
+
+    expect(fetchCalls).toBe(0)
+  })
+
+  // Regression: stop() + start() while a scheduleNext() is mid-await must
+  // not leave an orphan refresh chain behind. Without generation tracking
+  // the first chain's read resolves *after* the second start() bumps the
+  // active flag, both chains arm follow-up timers, only the latest is
+  // tracked in scheduledRefreshTimer, and the orphan keeps firing — every
+  // subsequent tick produces 2× the work.
+  it("does not leak a parallel refresh chain across stop/start while a read is in flight", async () => {
+    const { startBackgroundRefresh, stopBackgroundRefresh } = await import("../proxy/tokenRefresh")
+
+    // First two reads (one per generation's scheduleNext) park on a manual
+    // gate so we can force both chains to be in flight simultaneously.
+    // Subsequent reads (doRefresh's internal read, follow-up timer reads)
+    // resolve synchronously so the chains can run to completion.
+    const pendingReads: Array<(creds: typeof MOCK_CREDENTIALS) => void> = []
+    let readCalls = 0
+
+    let stored: typeof MOCK_CREDENTIALS = {
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 1000 },
+    }
+
+    mockFetch(() => Promise.resolve(makeSuccessResponse({
+      access_token: "new-access-token",
+      refresh_token: "new-refresh-token",
+      expires_in: 3600,
+    })))
+
+    const store: CredentialStore = {
+      read: () => {
+        readCalls++
+        if (readCalls <= 2) {
+          return new Promise(resolve => pendingReads.push(resolve))
+        }
+        return Promise.resolve(JSON.parse(JSON.stringify(stored)))
+      },
+      async write(c) {
+        stored = c as typeof MOCK_CREDENTIALS
+        return true
+      },
+    }
+
+    // gen-1 begins, scheduleNext-1 hits await store.read() and parks.
+    startBackgroundRefresh(store, 100, 60_000)
+    await tick(10)
+    expect(readCalls).toBe(1)
+
+    // stop() while gen-1's read is still pending.
+    stopBackgroundRefresh()
+
+    // start() bumps a new generation; scheduleNext-2 also parks on read.
+    startBackgroundRefresh(store, 100, 60_000)
+    await tick(10)
+    expect(readCalls).toBe(2)
+
+    // Release both parked reads with the (still expired) credentials. Both
+    // chains advance into refreshOAuthToken (dedup'd to one fetch via
+    // inflightRefresh, which writes the new long-lived expiry into stored).
+    // Each chain that survives then arms a 0-delay timer; when the timer
+    // fires, scheduleNext re-runs and store.read() is called again.
+    pendingReads[0]?.({ ...stored, claudeAiOauth: { ...stored.claudeAiOauth } })
+    pendingReads[1]?.({ ...stored, claudeAiOauth: { ...stored.claudeAiOauth } })
+
+    await tick(80)
+
+    // Read accounting:
+    //   1, 2 — initial scheduleNext reads (one per generation, gated)
+    //   3    — doRefresh's read inside refreshOAuthToken (single, dedup'd)
+    //   4..  — one follow-up read per scheduleNext chain that armed a timer
+    // With the fix only the live generation arms a follow-up → 4 total.
+    // With the bug both chains arm follow-ups → 5 total.
+    expect(readCalls).toBe(4)
+
+    stopBackgroundRefresh()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // createPlatformCredentialStore
 // ---------------------------------------------------------------------------
 
@@ -283,12 +596,51 @@ describe("isExpiredTokenError", () => {
     )).toBe(true)
   })
 
-  it("returns false for unrelated auth errors", async () => {
+  it("returns false for unrelated errors that lack a 401 marker", async () => {
     const { isExpiredTokenError } = await import("../proxy/errors")
     expect(isExpiredTokenError("authentication failed")).toBe(false)
     expect(isExpiredTokenError("rate limit exceeded")).toBe(false)
     expect(isExpiredTokenError("invalid credentials")).toBe(false)
     expect(isExpiredTokenError("token refresh failed")).toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Broadened triggers — generic 401s and RFC-6750 wording.
+  //
+  // Reason: Anthropic's API can return a 401 for an expired access token
+  // without echoing the CLI-specific "OAuth token has expired" string, so the
+  // narrow legacy matcher missed scheduled-expiry failures and the proxy
+  // never fired refresh-and-retry. Confirmed in production 2026-05-03 on two
+  // NAS instances that sat idle past expiry: credentials.json mtime never
+  // ticked, every request returned 401 to the client, no
+  // "token_refresh.retrying" ever logged.
+  // ---------------------------------------------------------------------------
+
+  it("detects generic 401 + authentication wording", async () => {
+    const { isExpiredTokenError } = await import("../proxy/errors")
+    expect(isExpiredTokenError("API Error: 401 authentication_error")).toBe(true)
+    expect(isExpiredTokenError("HTTP 401 Unauthorized")).toBe(true)
+    expect(isExpiredTokenError("401 invalid request")).toBe(true)
+  })
+
+  it("detects RFC-6750 token error codes", async () => {
+    const { isExpiredTokenError } = await import("../proxy/errors")
+    expect(isExpiredTokenError('error="invalid_token"')).toBe(true)
+    expect(isExpiredTokenError("token_expired")).toBe(true)
+  })
+
+  it("does not trigger on 401 without an auth keyword", async () => {
+    const { isExpiredTokenError } = await import("../proxy/errors")
+    // Hypothetical 401 without auth wording — leave as not-a-trigger to keep
+    // the false-positive surface narrow.
+    expect(isExpiredTokenError("API returned 401 over rate limit")).toBe(false)
+  })
+
+  it("does not trigger on non-401 errors that incidentally include auth words", async () => {
+    const { isExpiredTokenError } = await import("../proxy/errors")
+    expect(isExpiredTokenError("authentication failed")).toBe(false)
+    expect(isExpiredTokenError("invalid argument")).toBe(false)
+    expect(isExpiredTokenError("unauthorized scope")).toBe(false)
   })
 })
 

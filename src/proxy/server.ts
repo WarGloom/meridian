@@ -44,7 +44,7 @@ import { LRUMap } from "../utils/lruMap"
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
 import { classifyError, extractSdkTermination, formatSdkTermination, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
-import { refreshOAuthToken } from "./tokenRefresh"
+import { refreshOAuthToken, ensureFreshToken, startBackgroundRefresh, stopBackgroundRefresh } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDefaults, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
 import type { AnthropicSseEvent } from "./openai"
@@ -970,6 +970,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             const response = (async function* () {
               let rateLimitRetries = 0
 
+              // Proactive: refresh the access token if it's within the buffer
+              // of expiry. Best-effort — the reactive 401 path below picks up
+              // anything this misses. Saves a round-trip on the common case
+              // where the previous request left the token close to expiry.
+              await ensureFreshToken().catch(() => { /* reactive path handles */ })
+
               let tokenRefreshed = false
               while (true) {
                 // Track whether response content was yielded.
@@ -1436,6 +1442,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               const response = (async function* () {
                 let rateLimitRetries = 0
+
+                // Proactive token refresh — see non-stream path above.
+                await ensureFreshToken().catch(() => { /* reactive path handles */ })
+
                 let tokenRefreshed = false
 
                 while (true) {
@@ -2939,6 +2949,12 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     }
   })
 
+  // Background OAuth token refresh: keeps the refresh chain warm even when
+  // the proxy sits idle. Without it, an unused refresh token can be
+  // invalidated server-side after sitting unused for an extended period.
+  // Idempotent — re-calling start() on a hot-reload is a no-op.
+  startBackgroundRefresh()
+
   // Background auth keepalive: periodically refresh auth status for all
   // configured profiles so switching is instant (no stale token delay).
   let authKeepaliveInterval: ReturnType<typeof setInterval> | undefined
@@ -2966,6 +2982,7 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     config: finalConfig,
     async close() {
       if (authKeepaliveInterval) clearInterval(authKeepaliveInterval)
+      stopBackgroundRefresh()
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })
