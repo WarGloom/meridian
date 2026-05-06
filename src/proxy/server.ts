@@ -46,7 +46,7 @@ import type { RequestMetric } from "../telemetry"
 import { classifyError, extractSdkTermination, formatSdkTermination, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken, ensureFreshToken, startBackgroundRefresh, stopBackgroundRefresh } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
-import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDefaults, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
+import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDefaults, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, getResolvedClaudeExecutableInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
 import type { AnthropicSseEvent } from "./openai"
 import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, buildModelList, createSseTranslator } from "./openai"
 import { extractAdvisorModel, getLastUserMessage, stripAdvisorTools } from "./messages"
@@ -332,6 +332,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
   // Optional API key auth — protects all routes except / and /health
   // when MERIDIAN_API_KEY is set. No-op when unset.
+  //
+  // When adding a new sensitive prefix, add it here. The audit test in
+  // proxy-settings-auth.test.ts walks every registered route and fails CI
+  // if any non-public path responds with anything other than 401 to an
+  // unauthenticated request. That's the safety net against the next "we
+  // forgot to gate it" mistake (issue #477 was the catalyst — `/settings/*`
+  // was registered without going through requireAuth, so unauthenticated
+  // callers could mutate adapter SDK feature config via PATCH).
   app.use("/v1/*", requireAuth)
   app.use("/messages", requireAuth)
   app.use("/telemetry/*", requireAuth)
@@ -341,6 +349,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   app.use("/profiles", requireAuth)
   app.use("/plugins/*", requireAuth)
   app.use("/plugins", requireAuth)
+  app.use("/settings/*", requireAuth)
+  app.use("/settings", requireAuth)
   app.use("/auth/*", requireAuth)
 
   app.get("/", (c) => {
@@ -2387,6 +2397,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           auth: { loggedIn: false }
         }, 503)
       }
+      // Resolved Claude executable + which step produced it. Diagnostic
+      // surface for "the SDK is spawning the wrong claude" issues (#478).
+      // Null when /health is hit before the first SDK call (resolution is
+      // lazy in createProxyServer); startProxyServer eagerly populates it.
+      const claudeExecutableInfo = getResolvedClaudeExecutableInfo()
+
       return c.json({
         status: "healthy",
         version: serverVersion,
@@ -2396,6 +2412,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           subscriptionType: auth.subscriptionType,
         },
         mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
+        ...(claudeExecutableInfo ? { claudeExecutable: claudeExecutableInfo } : {}),
         plugin: { opencode: checkPluginConfigured() ? "configured" : "not-configured" },
       })
     } catch {
@@ -2929,6 +2946,14 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
       console.log(`Telemetry dashboard: http://${finalConfig.host}:${info.port}/telemetry`)
       const pins = resolveSdkModelDefaults()
       console.log(`Model pins: opus=${pins.ANTHROPIC_DEFAULT_OPUS_MODEL} sonnet=${pins.ANTHROPIC_DEFAULT_SONNET_MODEL} haiku=${pins.ANTHROPIC_DEFAULT_HAIKU_MODEL}`)
+      // Surface the resolved Claude executable + which step picked it.
+      // When users hit "wrong claude got picked" failure modes (e.g. a
+      // bun-shimmed `claude` on PATH, see #478), this single line is what
+      // turns a 30-message debugging thread into a one-look diagnosis.
+      const claudeInfo = getResolvedClaudeExecutableInfo()
+      if (claudeInfo) {
+        console.log(`Claude executable: ${claudeInfo.path} (resolved via ${claudeInfo.source})`)
+      }
       console.log(`\nPoint any Anthropic-compatible tool at this endpoint:`)
       console.log(`  ANTHROPIC_API_KEY=x ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port}`)
     }
