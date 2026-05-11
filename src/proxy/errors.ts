@@ -183,7 +183,7 @@ export function isRateLimitError(errMsg: string): boolean {
 export function isExtraUsageRequiredError(errMsg: string): boolean {
   const lower = errMsg.toLowerCase()
   if (!lower.includes("extra usage")) return false
-  return lower.includes("1m") || lower.includes("out of") || lower.includes("required") || lower.includes("add more")
+  return lower.includes("1m") || lower.includes("out of extra usage") || lower.includes("required") || lower.includes("add more")
 }
 
 /**
