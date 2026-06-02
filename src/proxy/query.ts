@@ -122,33 +122,19 @@ export interface BuildQueryResult {
   options: Options
 }
 
+const PASSTHROUGH_MAX_TURNS = 30
+
 /**
  * NOTE: agent-specific (passthrough mode).
  *
- * Compute maxTurns based on which SDK features are active. Each phase the SDK
- * walks before returning control to the host costs a turn:
- *   - Base (3): turn 1 generates content (extended thinking + tool_use blocks
- *     captured by PreToolUse hook); turn 2 receives the deny and may emit a
- *     follow-up (text or further tool_use); turn 3 wraps the stream cleanly.
- *     Was 2 historically — bumped after telemetry showed opus[1m] requests with
- *     thinking + tool_use exhausting the 2-turn budget mid-handoff and returning
- *     500s on fresh (non-resume) requests. See errors.ts sdk_termination
- *     diagnostic + telemetry.
- *   - Resume / deferred (no extra turn over base): both fit within the 3-turn
- *     budget. Resume rehydration and ToolSearch lookups complete inside turn 1.
- *   - Both resume and deferred (+1): a second prelude phase pushes one phase
- *     out, so budget becomes 4.
- *   - Advisor (+3): server-side advisor executes call + result + final answer.
+ * maxTurns is a safety ceiling for SDK agent/tool round trips, not an exact
+ * phase budget. Passthrough still needs enough room for variable SDK internals:
+ * blocked-tool handoff, session resume, deferred ToolSearch, multimodal setup,
+ * and optional advisor turns. Exact phase counting caused real screenshot flows
+ * to fail with "Reached maximum number of turns (4)" before a useful tool call.
  */
-function computePassthroughMaxTurns(
-  resumeSessionId: string | undefined,
-  hasDeferredTools: boolean,
-  advisorModel: string | undefined,
-): number {
-  const hasResume = !!resumeSessionId
-  const base = hasResume && hasDeferredTools ? 4 : 3
-  const advisorBump = advisorModel ? 3 : 0
-  return base + advisorBump
+function computePassthroughMaxTurns(): number {
+  return PASSTHROUGH_MAX_TURNS
 }
 
 /**
@@ -254,9 +240,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      maxTurns: passthrough
-        ? computePassthroughMaxTurns(resumeSessionId, hasDeferredTools, ctx.advisorModel)
-        : 200,
+      maxTurns: passthrough ? computePassthroughMaxTurns() : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,

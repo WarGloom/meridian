@@ -4,8 +4,8 @@
  * Regression tests for two bugs that broke tool_use flows in passthrough mode:
  *
  * Bug 1 (non-streaming): maxTurns:1 caused HTTP 500 on multi-turn tool flows.
- *   The SDK needs a second internal turn to process the blocked-tool handoff
- *   before returning. Fixed by raising maxTurns to 2.
+ *   The SDK needs a passthrough ceiling high enough to survive blocked-tool
+ *   handoff and other variable internal turns before returning.
  *
  * Bug 2 (streaming): After the model emitted message_delta(stop_reason:tool_use),
  *   the SDK continued by executing the passthrough MCP no-op (→ "passthrough"),
@@ -267,7 +267,7 @@ describe("Passthrough non-streaming: tool_use returned without HTTP 500", () => 
   })
 
   it("returns 200 with tool_use stop_reason when model calls a passthrough tool", async () => {
-    // The SDK (with maxTurns:2) completes successfully.
+    // The SDK completes successfully with the passthrough maxTurns ceiling.
     // The assistant message contains a tool_use block.
     mockMessages = [
       assistantMessage([

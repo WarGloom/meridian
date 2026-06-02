@@ -218,7 +218,7 @@ For large tool sets (>15 tools), non-core tools are automatically deferred via t
 
 ### Known limitations
 
-- **Single tool round-trip per request** — in passthrough mode, the SDK is configured with `maxTurns=2` (or 3 for deferred tools). Multi-step agentic loops where Claude needs several consecutive tool calls require the client to re-send after each round.
+- **Single tool round-trip per request** — in passthrough mode, the SDK uses a fixed `maxTurns=30` safety ceiling so variable internal SDK setup does not fail prematurely. Meridian still returns only the first client-facing tool round trip. Multi-step agentic loops where Claude needs several consecutive tool calls require the client to re-send after each round.
 - **Blocked tools** — 13 built-in SDK tools (Read, Write, Bash, etc.) are blocked to prevent conflicts with the client's own tools. 15 additional Claude Code-only tools (CronCreate, EnterWorktree, Agent, etc.) are blocked because they require capabilities that external clients don't support.
 - **Subagent extraction** — Meridian parses the client's Task tool description to extract subagent names and build SDK AgentDefinitions. If the client's agent framework uses a non-standard format, subagent routing may not work automatically.
 
