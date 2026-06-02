@@ -28,7 +28,9 @@ import type { ProfileType } from "./profiles"
  * silently stripping something the SDK needs for normal operation.
  */
 export const BILLABLE_BETA_PREFIXES_ON_MAX: readonly string[] = [
-  "extended-cache-ttl-",
+  // Empty: extended-cache-ttl-* was empirically verified to NOT
+  // trigger Extra-Usage billing on Claude Max accounts with Extra Usage
+  // disabled (returns 200 + valid usage counters, never 4xx).
 ]
 
 /**

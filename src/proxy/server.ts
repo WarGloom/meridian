@@ -107,19 +107,31 @@ function hasMultimodalContent(content: any): boolean {
   })
 }
 
-function stripCacheControlDeep(content: any): any {
+/**
+ * Upgrade existing cache_control entries to ttl "1h", or add one ttl-1h
+ * marker on the tail-most content block when none exist. Idempotent.
+ * Respects Anthropic's 4-marker per-request limit by never adding when
+ * markers already exist (only upgrading them).
+ */
+function upgradeOrAddCacheControl1h(content: any): any {
+  const TARGET = { type: "ephemeral" as const, ttl: "1h" }
+  if (typeof content === "string") {
+    return [{ type: "text", text: content, cache_control: TARGET }]
+  }
   if (!Array.isArray(content)) return content
-  return content.map((block: any) => {
-    if (!block || typeof block !== "object") return block
-    const { cache_control, ...rest } = block
-    if (block.type === "tool_result" && Array.isArray(block.content)) {
-      return {
-        ...rest,
-        content: stripCacheControlDeep(block.content),
-      }
-    }
-    return rest
-  })
+  const hasExisting = content.some((b) => b && typeof b === "object" && b.cache_control)
+  if (hasExisting) {
+    return content.map((b) =>
+      b && typeof b === "object" && b.cache_control ? { ...b, cache_control: TARGET } : b,
+    )
+  }
+  let lastIdx = -1
+  for (let i = content.length - 1; i >= 0; i--) {
+    const b = content[i]
+    if (b && typeof b === "object") { lastIdx = i; break }
+  }
+  if (lastIdx === -1) return content
+  return content.map((b, i) => (i === lastIdx ? { ...b, cache_control: TARGET } : b))
 }
 
 function normalizeStructuredUserContent(content: any): any {
@@ -214,7 +226,7 @@ function buildFreshPrompt(
       if (m.role === "user") {
         structured.push({
           type: "user" as const,
-          message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+          message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
           parent_tool_use_id: null,
         })
       } else {
@@ -230,6 +242,16 @@ function buildFreshPrompt(
         }
       }
     }
+    // Attach 1h cache_control to the last user message's tail block so
+    // long idle gaps still hit cache. Strip-disabled: any upstream
+    // cache_control markers also flow through unchanged.
+    if (structured.length > 0) {
+      const tail = structured[structured.length - 1]
+      if (tail?.message) {
+        tail.message.content = upgradeOrAddCacheControl1h(tail.message.content)
+      }
+    }
+
     return (async function* () { for (const msg of structured) yield msg })()
   }
 
@@ -742,7 +764,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+                message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
                 parent_tool_use_id: null,
               })
             }
@@ -753,7 +775,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+                message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
                 parent_tool_use_id: null,
               })
             } else {
@@ -768,6 +790,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 })
               }
             }
+          }
+        }
+
+        // Attach 1h cache_control to the last user message's tail block so
+        // long idle gaps still hit cache. Strip-disabled: any upstream
+        // cache_control markers also flow through unchanged.
+        if (structuredMessages.length > 0) {
+          const tail = structuredMessages[structuredMessages.length - 1]
+          if (tail?.message) {
+            tail.message.content = upgradeOrAddCacheControl1h(tail.message.content)
           }
         }
       } else {

@@ -335,6 +335,7 @@ export async function ensureFreshToken(
 
 let scheduledRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let scheduledRefreshActive = false
+const MIN_FAILURE_RETRY_MS = process.env.NODE_ENV === "test" || process.env.BUN_ENV === "test" ? 25 : 60_000
 // Generation counter — bumped on every start/stop. Each scheduleNext chain
 // captures the generation it began with and re-checks it after every await;
 // if the global generation has moved on, the chain has been superseded and
@@ -372,8 +373,9 @@ export function startBackgroundRefresh(
 ): void {
   if (scheduledRefreshActive) return
   scheduledRefreshActive = true
+  const safeFailureRetryMs = Math.max(failureRetryMs, MIN_FAILURE_RETRY_MS)
   const gen = ++scheduledRefreshGeneration
-  void scheduleNext(store ?? createPlatformCredentialStore(), bufferMs, failureRetryMs, gen)
+  void scheduleNext(store ?? createPlatformCredentialStore(), bufferMs, safeFailureRetryMs, gen)
 }
 
 /** Stop the background scheduler. Idempotent. */
@@ -411,8 +413,7 @@ async function scheduleNext(
     // new expiresAt (or retry in failureRetryMs if refresh failed).
     const ok = await refreshOAuthToken(store)
     if (!scheduledRefreshActive || gen !== scheduledRefreshGeneration) return
-    claudeLog("token_refresh.scheduled", { ok, immediate: true })
-    console.error(`[token_refresh] scheduled refresh (immediate) ok=${ok}`)
+    claudeLog("token_refresh.scheduled", { ok, immediate: true, retryInMs: ok ? 0 : failureRetryMs })
     armTimer(ok ? 0 : failureRetryMs, store, bufferMs, failureRetryMs, gen)
     return
   }
