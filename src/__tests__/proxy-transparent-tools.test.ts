@@ -14,16 +14,13 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
 import {
   messageStart,
   textBlockStart,
-  toolUseBlockStart,
   textDelta,
-  inputJsonDelta,
   blockStop,
   messageDelta,
   messageStop,
   assistantMessage,
   makeRequest,
   makeToolResultRequest,
-  parseSSE,
 } from "./helpers"
 
 // --- Capture SDK calls ---
@@ -183,7 +180,7 @@ describe("Phase 2: Message format preservation", () => {
     else delete process.env.MERIDIAN_PASSTHROUGH
   })
 
-  it("should pass system prompt via appendSystemPrompt, not merged into messages", async () => {
+  it("should carry client system text in the prompt, not the SDK systemPrompt", async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hi" }]),
     ]
@@ -196,17 +193,16 @@ describe("Phase 2: Message format preservation", () => {
     }))
     await response.json()
 
-    // System prompt should be passed via systemPrompt option (append to Claude Code default)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport.
     expect(capturedQueryParams).toBeDefined()
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: "You are a helpful assistant.",
     })
-    // Prompt text should NOT contain the system context (it's in the SDK option now)
     const prompt = capturedQueryParams.prompt
     expect(typeof prompt).toBe("string")
-    expect(prompt).not.toContain("You are a helpful assistant.")
+    expect(prompt).toContain("<client-system-instructions>\nYou are a helpful assistant.")
   })
 
   it("should include tool_result content in the prompt sent to SDK", async () => {

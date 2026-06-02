@@ -179,19 +179,40 @@ export function buildCwdNote(sdkCwd: string, clientCwd?: string): string {
   )
 }
 
+function buildClientContext(systemContext: string | undefined, includeClient: boolean): string | undefined {
+  if (!includeClient || !systemContext) return undefined
+  return `<client-system-instructions>\n${systemContext}\n</client-system-instructions>`
+}
+
+function prependClientContextToPrompt(
+  prompt: QueryContext["prompt"],
+  clientContext: string | undefined,
+): QueryContext["prompt"] {
+  if (!clientContext) return prompt
+  if (typeof prompt === "string") {
+    return `${clientContext}\n\n${prompt}`
+  }
+
+  return (async function* () {
+    yield {
+      type: "user" as const,
+      message: { role: "user" as const, content: clientContext },
+      parent_tool_use_id: null,
+    }
+    yield* prompt
+  })()
+}
+
 function resolveSystemPrompt(
-  systemContext: string | undefined,
+  hasClientContext: boolean,
   passthrough: boolean,
   settingSources: SettingSource[] | undefined,
   codeSystemPrompt: boolean | undefined,
-  clientSystemPrompt: boolean | undefined,
   cwdNote: string,
 ): { systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string } } {
   const hasSettings = settingSources != null && settingSources.length > 0
-  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && !!systemContext))
-  const includeClient = clientSystemPrompt ?? true
-  const clientContext = includeClient ? systemContext : undefined
-  const append = [clientContext, cwdNote].filter(Boolean).join("") || undefined
+  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && hasClientContext))
+  const append = cwdNote || undefined
 
   if (usePreset) {
     return append
@@ -219,11 +240,14 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
     memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
+  const includeClient = clientSystemPrompt ?? true
+  const clientContext = buildClientContext(systemContext, includeClient)
+  const promptClientContext = clientContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
   return {
-    prompt,
+    prompt: prependClientContextToPrompt(prompt, promptClientContext),
     options: {
       // Force Node as the executable. The claude-agent-sdk auto-detects Bun
       // via process.versions.bun and defaults to spawning `bun cli.js`.
@@ -239,7 +263,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(stream ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...resolveSystemPrompt(systemContext, passthrough, settingSources, codeSystemPrompt, clientSystemPrompt, cwdNote),
+      ...resolveSystemPrompt(clientContext != null, passthrough, settingSources, codeSystemPrompt, cwdNote),
       ...(passthrough
         ? {
             // Strip the SDK's ~25k-token built-in tool catalog from the
@@ -278,8 +302,8 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(settingSources && settingSources.length > 0 ? {
         settingSources,
         settings: {
-          autoMemoryEnabled: ctx.memory ?? true,
-          autoDreamEnabled: ctx.dreaming ?? false,
+          autoMemoryEnabled: memory ?? true,
+          autoDreamEnabled: dreaming ?? false,
         },
       } : {}),
       ...(onStderr ? { stderr: onStderr } : {}),
