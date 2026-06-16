@@ -6,38 +6,54 @@
     systems.url = "github:nix-systems/default";
     bun2nix = {
       url = "github:nix-community/bun2nix/2.0.8";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.systems.follows = "systems";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        systems.follows = "systems";
+        flake-parts.follows = "flake-parts";
+      };
+    };
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
     };
   };
 
   outputs =
-    {
+    inputs@{
       self,
       nixpkgs,
       systems,
       bun2nix,
+      flake-parts,
     }:
-    let
-      eachSystem = nixpkgs.lib.genAttrs (import systems);
-      pkgsFor = eachSystem (
-        system:
-        import nixpkgs {
-          inherit system;
-          overlays = [ bun2nix.overlays.default ];
-        }
-      );
-    in
-    {
-      packages = eachSystem (system: {
-        meridian = pkgsFor.${system}.callPackage ./nix/package.nix { };
-        default = self.packages.${system}.meridian;
-      });
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = import systems;
 
-      overlays.default = final: _: {
-        meridian = self.packages.${final.stdenv.hostPlatform.system}.meridian;
+      perSystem =
+        {
+          config,
+          pkgs,
+          system,
+          ...
+        }:
+        {
+          _module.args.pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ bun2nix.overlays.default ];
+          };
+
+          packages = {
+            default = config.packages.meridian;
+            meridian = pkgs.callPackage ./nix/package.nix { };
+          };
+        };
+
+      flake = {
+        overlays.default = final: _: {
+          inherit (self.packages.${final.stdenv.hostPlatform.system}) meridian;
+        };
+
+        homeManagerModules.default = import ./nix/hm-module.nix { meridianPackages = self.packages; };
       };
-
-      homeManagerModules.default = import ./nix/hm-module.nix { meridianPackages = self.packages; };
     };
 }
