@@ -36,9 +36,8 @@
         in
         {
           meridian = pkgs.stdenvNoCC.mkDerivation {
+            inherit (pkgs.lib.importJSON ./package.json) version;
             pname = "meridian";
-            version =
-              (builtins.fromJSON (builtins.readFile ./package.json)).version;
 
             src = pkgs.lib.cleanSource ./.;
 
@@ -49,9 +48,7 @@
               pkgs.makeWrapper
             ];
 
-            bunDeps = pkgs.bun2nix.fetchBunDeps {
-              bunNix = ./bun.nix;
-            };
+            bunDeps = pkgs.bun2nix.fetchBunDeps { bunNix = ./bun.nix; };
 
             bunInstallFlags = [ "--linker=hoisted" ];
 
@@ -71,7 +68,7 @@
               cp package.json $out/lib/meridian/
 
               mkdir -p $out/bin
-              makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/meridian \
+              makeWrapper ${pkgs.lib.getExe pkgs.nodejs_22} $out/bin/meridian \
                 --add-flags "$out/lib/meridian/dist/cli.js"
 
               runHook postInstall
@@ -95,12 +92,10 @@
         }
       );
 
-      overlays.default = final: prev: {
+      overlays.default = final: _: {
         meridian = self.packages.${final.stdenv.hostPlatform.system}.meridian;
       };
 
-      homeManagerModules.default = import ./nix/hm-module.nix {
-        meridianPackages = self.packages;
-      };
+      homeManagerModules.default = import ./nix/hm-module.nix { meridianPackages = self.packages; };
     };
 }

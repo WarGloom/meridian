@@ -11,7 +11,7 @@ let
 in
 {
   options.services.meridian = {
-    enable = lib.mkEnableOption "Meridian proxy service";
+    enable = lib.mkEnableOption "the Meridian proxy service";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -89,47 +89,33 @@ in
     home.packages = [ pkg ];
 
     systemd.user.services.meridian = {
-      Unit = {
-        Description = "Meridian - Local Anthropic API proxy";
-      };
+      Unit.Description = "Meridian - Local Anthropic API proxy";
 
       Service = {
         Type = "simple";
-        ExecStart = "${pkg}/bin/meridian";
+        ExecStart = lib.getExe pkg;
         Restart = "on-failure";
         RestartSec = 5;
 
         Environment =
           let
             env =
-              {
-                MERIDIAN_PORT = toString cfg.settings.port;
-                MERIDIAN_HOST = cfg.settings.host;
-                MERIDIAN_IDLE_TIMEOUT_SECONDS = toString cfg.settings.idleTimeoutSeconds;
-              }
-              // lib.optionalAttrs (cfg.settings.passthrough != null) {
-                MERIDIAN_PASSTHROUGH = if cfg.settings.passthrough then "1" else "0";
-              }
-              // lib.optionalAttrs (cfg.settings.defaultAgent != null) {
+              lib.filterAttrs (_: v: v != null) {
                 MERIDIAN_DEFAULT_AGENT = cfg.settings.defaultAgent;
-              }
-              // lib.optionalAttrs (cfg.settings.sonnetModel != null) {
+                MERIDIAN_HOST = cfg.settings.host;
+                MERIDIAN_IDLE_TIMEOUT_SECONDS = cfg.settings.idleTimeoutSeconds;
+                MERIDIAN_PASSTHROUGH = lib.mapNullable (b: if b then "1" else "0") cfg.settings.passthrough;
+                MERIDIAN_PORT = cfg.settings.port;
                 MERIDIAN_SONNET_MODEL = cfg.settings.sonnetModel;
-              }
-              // lib.optionalAttrs cfg.settings.telemetry.persist {
-                MERIDIAN_TELEMETRY_PERSIST = "1";
-              }
-              // lib.optionalAttrs (cfg.settings.telemetry.retentionDays != null) {
-                MERIDIAN_TELEMETRY_RETENTION_DAYS = toString cfg.settings.telemetry.retentionDays;
+                MERIDIAN_TELEMETRY_PERSIST = if cfg.settings.telemetry.persist then "1" else null;
+                MERIDIAN_TELEMETRY_RETENTION_DAYS = cfg.settings.telemetry.retentionDays;
               }
               // cfg.environment;
           in
-          lib.mapAttrsToList (k: v: "${k}=${v}") env;
+          lib.mapAttrsToList (k: v: "${k}=${toString v}") env;
       };
 
-      Install = {
-        WantedBy = [ "default.target" ];
-      };
+      Install.WantedBy = [ "default.target" ];
     };
   };
 }
