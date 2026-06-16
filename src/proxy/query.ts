@@ -95,6 +95,8 @@ export interface QueryContext {
   codeSystemPrompt?: boolean
   /** Include the client agent's system prompt */
   clientSystemPrompt?: boolean
+  /** Where to place the client system prompt when the Claude Code preset is disabled. */
+  clientSystemPromptPlacement?: "prompt" | "systemPrompt"
   /** Enable auto-memory (read + write across sessions) */
   memory?: boolean
   /** Enable background memory consolidation (dreaming) */
@@ -192,6 +194,7 @@ function prependClientContextToPrompt(
 
 function resolveSystemPrompt(
   hasClientContext: boolean,
+  clientSystemPromptOption: string | undefined,
   passthrough: boolean,
   settingSources: SettingSource[] | undefined,
   codeSystemPrompt: boolean | undefined,
@@ -205,6 +208,9 @@ function resolveSystemPrompt(
     return append
       ? { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append } }
       : { systemPrompt: { type: "preset" as const, preset: "claude_code" as const } }
+  }
+  if (clientSystemPromptOption) {
+    return append ? { systemPrompt: `${clientSystemPromptOption}\n\n${append}` } : { systemPrompt: clientSystemPromptOption }
   }
   if (append) return { systemPrompt: append }
   // Defensive: when `codeSystemPrompt: false` is explicit and there's
@@ -223,13 +229,19 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv, hasDeferredTools,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, blockedTools, incompatibleTools,
     mcpServerName, allowedMcpTools, onStderr,
-    effort, thinking, taskBudget, betas, settingSources, codeSystemPrompt, clientSystemPrompt,
+    effort, thinking, taskBudget, betas, settingSources, codeSystemPrompt, clientSystemPrompt, clientSystemPromptPlacement,
     memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
   const includeClient = clientSystemPrompt ?? true
+  const useClientSystemPromptOption =
+    clientSystemPromptPlacement === "systemPrompt" &&
+    codeSystemPrompt !== true &&
+    includeClient &&
+    systemContext.trim().length > 0
   const clientContext = buildClientContext(systemContext, includeClient)
-  const promptClientContext = clientContext
+  const promptClientContext = useClientSystemPromptOption ? undefined : clientContext
+  const clientSystemPromptOption = useClientSystemPromptOption ? systemContext : undefined
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
@@ -248,7 +260,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(stream ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...resolveSystemPrompt(clientContext != null, passthrough, settingSources, codeSystemPrompt, cwdNote),
+      ...resolveSystemPrompt(clientContext != null, clientSystemPromptOption, passthrough, settingSources, codeSystemPrompt, cwdNote),
       ...(passthrough
         ? {
             // Strip the SDK's ~25k-token built-in tool catalog from the
