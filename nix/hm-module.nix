@@ -90,21 +90,23 @@ in
         RestartSec = 5;
 
         Environment =
-          let
-            env =
-              lib.filterAttrs (_: v: v != null) {
-                MERIDIAN_DEFAULT_AGENT = cfg.settings.defaultAgent;
-                MERIDIAN_HOST = cfg.settings.host;
-                MERIDIAN_IDLE_TIMEOUT_SECONDS = cfg.settings.idleTimeoutSeconds;
-                MERIDIAN_PASSTHROUGH = lib.mapNullable (b: if b then "1" else "0") cfg.settings.passthrough;
-                MERIDIAN_PORT = cfg.settings.port;
-                MERIDIAN_SONNET_MODEL = cfg.settings.sonnetModel;
-                MERIDIAN_TELEMETRY_PERSIST = if cfg.settings.telemetry.persist then "1" else null;
-                MERIDIAN_TELEMETRY_RETENTION_DAYS = cfg.settings.telemetry.retentionDays;
-              }
-              // cfg.environment;
-          in
-          lib.mapAttrsToList (k: v: "${k}=${toString v}") env;
+          lib.pipe
+            {
+              MERIDIAN_DEFAULT_AGENT = cfg.settings.defaultAgent;
+              MERIDIAN_HOST = cfg.settings.host;
+              MERIDIAN_IDLE_TIMEOUT_SECONDS = cfg.settings.idleTimeoutSeconds;
+              MERIDIAN_PASSTHROUGH = cfg.settings.passthrough;
+              MERIDIAN_PORT = cfg.settings.port;
+              MERIDIAN_SONNET_MODEL = cfg.settings.sonnetModel;
+              MERIDIAN_TELEMETRY_PERSIST = cfg.settings.telemetry.persist;
+              MERIDIAN_TELEMETRY_RETENTION_DAYS = cfg.settings.telemetry.retentionDays;
+            }
+            [
+              (lib.filterAttrs (_: v: v != null))
+              (lib.mapAttrs (_: lib.generators.mkValueStringDefault { }))
+              (lib.flip lib.mergeAttrs cfg.environment)
+              (lib.mapAttrsToList (k: v: "${k}=${v}"))
+            ];
       };
 
       Install.WantedBy = [ "default.target" ];
