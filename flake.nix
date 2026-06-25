@@ -67,7 +67,9 @@
 
           homeModules = {
             default = self.homeModules.meridian;
-            meridian = moduleWithSystem ({ self', ... }: import ./nix/hm-module.nix self'.packages);
+            meridian = moduleWithSystem (
+              { self', ... }: flake-parts.lib.importApply ./nix/hm-module.nix self'.packages
+            );
           };
 
           overlays = {
