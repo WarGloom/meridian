@@ -62,8 +62,8 @@ delete process.env.CLAUDE_PROXY_FOLLOW_ACTIVE
 // test-tmp-dirs.ts). One already carrying this pid can only be a dead
 // process's, so it is cleared rather than inherited.
 sweepStaleTestDirs(tmpdir())
-const { configDir, sessionDir, tempDir } = testDirsFor(tmpdir(), process.pid)
-for (const dir of [configDir, sessionDir, tempDir]) {
+const { configDir, sessionDir, tempDir, sdkFeaturesDir } = testDirsFor(tmpdir(), process.pid)
+for (const dir of [configDir, sessionDir, tempDir, sdkFeaturesDir]) {
   if (!removeTestDir(dir)) throw new Error(`Could not reset test scratch directory: ${dir}`)
   mkdirSync(dir, { recursive: true })
 }
@@ -74,6 +74,7 @@ afterAll(() => {
   removeTestDir(configDir)
   removeTestDir(sessionDir)
   removeTestDir(tempDir)
+  removeTestDir(sdkFeaturesDir)
 })
 process.env.MERIDIAN_CONFIG_DIR = configDir
 process.env.MERIDIAN_SESSION_DIR = sessionDir
@@ -109,3 +110,9 @@ process.env.MERIDIAN_SESSION_GC_MAX_PENDING = "1000000"
 
 // SDK mocks do not spawn an operating-system child. Real proxy/E2E processes do not load this preload.
 process.env.MERIDIAN_TEST_DISABLE_SDK_PROCESS_GATE = "1"
+
+// sdkFeatures.ts stores its independently configurable settings under
+// XDG_CONFIG_HOME/meridian. Isolate that path too: otherwise an explicit
+// local adapter setting (for example opencode.thinking: "disabled") changes
+// request-level SDK parameter tests.
+process.env.XDG_CONFIG_HOME = sdkFeaturesDir
