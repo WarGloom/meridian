@@ -55,6 +55,8 @@ export interface SessionState {
   sdkMessageUuids?: Array<string | null>
   /** Last observed token usage for this session (from SDK message_start / message_delta events) */
   contextUsage?: TokenUsage
+  /** Hash of the client system context already persisted in this SDK session. */
+  clientContextHash?: string
 }
 
 /**

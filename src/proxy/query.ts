@@ -9,7 +9,6 @@ import { join } from "node:path"
 import type { Options, OutputFormat, SdkBeta, SettingSource } from "@anthropic-ai/claude-agent-sdk"
 import { createOpencodeMcpServer } from "../mcpTools"
 import { createPassthroughMcpServer, PASSTHROUGH_MCP_NAME } from "./passthroughTools"
-import { envInt } from "../env"
 import type { Effort } from "./effort"
 
 /**
@@ -66,6 +65,8 @@ export interface QueryContext {
   hasDeferredTools: boolean
   /** SDK session ID for resume (if continuing a session) */
   resumeSessionId?: string
+  /** The resumed passthrough session already has this exact client context. */
+  skipClientContextOnResume?: boolean
   /** Whether this is an undo operation */
   isUndo: boolean
   /** UUID to rollback to for undo operations */
@@ -102,6 +103,8 @@ export interface QueryContext {
   codeSystemPrompt?: boolean
   /** Include the client agent's system prompt */
   clientSystemPrompt?: boolean
+  /** Where to place the client system prompt when the Claude Code preset is disabled. */
+  clientSystemPromptPlacement?: "prompt" | "systemPrompt"
   /** Enable auto-memory (read + write across sessions) */
   memory?: boolean
   /** Enable background memory consolidation (dreaming) */
@@ -130,45 +133,19 @@ export interface BuildQueryResult {
   options: Options
 }
 
+const PASSTHROUGH_MAX_TURNS = 30
+
 /**
  * NOTE: agent-specific (passthrough mode).
  *
- * Compute maxTurns based on which SDK features are active. Each phase the SDK
- * walks before returning control to the host costs a turn:
- *   - Base (3): turn 1 generates content (extended thinking + tool_use blocks
- *     captured by PreToolUse hook); turn 2 receives the deny and may emit a
- *     follow-up (text or further tool_use); turn 3 wraps the stream cleanly.
- *     Was 2 historically — bumped after telemetry showed opus[1m] requests with
- *     thinking + tool_use exhausting the 2-turn budget mid-handoff and returning
- *     500s on fresh (non-resume) requests. See errors.ts sdk_termination
- *     diagnostic + telemetry.
- *   - Deferred tools (+1): a ToolSearch discovery is a real model round-trip
- *     that consumes a turn before the model can emit the real tool_use. The
- *     old model wrongly assumed a lone deferred set fit in base 3, so the
- *     discovery ate into the tool-call budget — deferred sessions hit max_turns
- *     prematurely, forcing cold-cache retries and churn (#547).
- *   - Resume (+0): rehydration completes inline within turn 1, so it adds no
- *     turn — a resumed deferred session is 4, same as a fresh deferred one.
- *   - Advisor (+3): server-side advisor executes call + result + final answer.
+ * maxTurns is a safety ceiling for SDK agent/tool round trips, not an exact
+ * phase budget. Passthrough still needs enough room for variable SDK internals:
+ * blocked-tool handoff, session resume, deferred ToolSearch, multimodal setup,
+ * and optional advisor turns. Exact phase counting caused real screenshot flows
+ * to fail with "Reached maximum number of turns (4)" before a useful tool call.
  */
-function computePassthroughMaxTurns(
-  hasDeferredTools: boolean,
-  advisorModel: string | undefined,
-): number {
-  const deferredBump = hasDeferredTools ? 1 : 0
-  const defaultBase = 3 + deferredBump
-  // The base is the SDK's internal-loop budget before it must return control.
-  // It's normally enough (the capture path drops re-emitted duplicates and
-  // stops the loop when the model starts repeating), but wide parallel tool
-  // calls — which the SDK surfaces one assistant turn each — can need more
-  // headroom, and orchestration clients hit it on deep chains (#494). Allow
-  // MERIDIAN_PASSTHROUGH_MAX_TURNS / CLAUDE_PROXY_PASSTHROUGH_MAX_TURNS to
-  // raise (or lower) the base (incl. the deferred bump); the advisor bump
-  // below is added on top and is unaffected by the override.
-  const configured = envInt("PASSTHROUGH_MAX_TURNS", defaultBase)
-  const base = configured > 0 ? configured : defaultBase
-  const advisorBump = advisorModel ? 3 : 0
-  return base + advisorBump
+function computePassthroughMaxTurns(): number {
+  return PASSTHROUGH_MAX_TURNS
 }
 
 /**
@@ -199,24 +176,49 @@ export function buildCwdNote(sdkCwd: string, clientCwd?: string): string {
   )
 }
 
+function buildClientContext(systemContext: string | undefined, includeClient: boolean): string | undefined {
+  if (!includeClient || !systemContext) return undefined
+  return `<client-system-instructions>\n${systemContext}\n</client-system-instructions>`
+}
+
+function prependClientContextToPrompt(
+  prompt: QueryContext["prompt"],
+  clientContext: string | undefined,
+): QueryContext["prompt"] {
+  if (!clientContext) return prompt
+  if (typeof prompt === "string") {
+    return `${clientContext}\n\n${prompt}`
+  }
+
+  return (async function* () {
+    yield {
+      type: "user" as const,
+      message: { role: "user" as const, content: clientContext },
+      parent_tool_use_id: null,
+    }
+    yield* prompt
+  })()
+}
+
 function resolveSystemPrompt(
-  systemContext: string | undefined,
+  hasClientContext: boolean,
+  clientSystemPromptOption: string | undefined,
   passthrough: boolean,
   settingSources: SettingSource[] | undefined,
   codeSystemPrompt: boolean | undefined,
-  clientSystemPrompt: boolean | undefined,
   cwdNote: string,
 ): { systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string } } {
   const hasSettings = settingSources != null && settingSources.length > 0
-  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && !!systemContext))
-  const includeClient = clientSystemPrompt ?? true
-  const clientContext = includeClient ? systemContext : undefined
-  const append = [clientContext, cwdNote].filter(Boolean).join("") || undefined
+  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && hasClientContext))
+  const append = cwdNote || undefined
 
   if (usePreset) {
     return append
       ? { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append } }
       : { systemPrompt: { type: "preset" as const, preset: "claude_code" as const } }
+  }
+  if (clientSystemPromptOption) {
+    return append ? { systemPrompt: `${clientSystemPromptOption}\n\n${append}` } : { systemPrompt: clientSystemPromptOption }
   }
   if (append) return { systemPrompt: append }
   // Defensive: when `codeSystemPrompt: false` is explicit and there's
@@ -233,26 +235,41 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
   const {
     prompt, model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv, hasDeferredTools,
-    resumeSessionId, isUndo, undoRollbackUuid, forkSession, sdkHooks, blockedTools, incompatibleTools,
+    resumeSessionId, skipClientContextOnResume, isUndo, undoRollbackUuid, forkSession, sdkHooks, blockedTools, incompatibleTools,
     mcpServerName, allowedMcpTools, onStderr,
-    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt,
-    memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories,
+    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt, clientSystemPromptPlacement,
+    memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories, advisorModel,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
+  const includeClient = clientSystemPrompt ?? true
+  const useClientSystemPromptOption =
+    clientSystemPromptPlacement === "systemPrompt" &&
+    codeSystemPrompt !== true &&
+    includeClient &&
+    systemContext.trim().length > 0
+  const clientContext = buildClientContext(systemContext, includeClient)
+  // The resumed SDK session already contains the client instructions from its
+  // first turn. Re-injecting them into every continuation appends another full
+  // copy to the conversation, which can consume tens of thousands of tokens
+  // per client-side tool result. Fresh and forked sessions still receive the
+  // current client context.
+  const resumeHasClientContext = Boolean(
+    passthrough && resumeSessionId && !isUndo && skipClientContextOnResume,
+  )
+  const promptClientContext = resumeHasClientContext || useClientSystemPromptOption ? undefined : clientContext
+  const clientSystemPromptOption = resumeHasClientContext || !useClientSystemPromptOption ? undefined : systemContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
   return {
-    prompt,
+    prompt: prependClientContextToPrompt(prompt, promptClientContext),
     options: {
       // Force Node as the executable. The claude-agent-sdk auto-detects Bun
       // via process.versions.bun and defaults to spawning `bun cli.js`.
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      maxTurns: passthrough
-        ? computePassthroughMaxTurns(hasDeferredTools, ctx.advisorModel)
-        : 200,
+      maxTurns: passthrough ? computePassthroughMaxTurns() : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
@@ -260,7 +277,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(stream ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...resolveSystemPrompt(systemContext, passthrough, settingSources, codeSystemPrompt, clientSystemPrompt, cwdNote),
+      ...resolveSystemPrompt(clientContext != null, clientSystemPromptOption, passthrough, settingSources, codeSystemPrompt, cwdNote),
       ...(passthrough
         ? {
             // Strip the SDK's ~25k-token built-in tool catalog from the
@@ -290,8 +307,8 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       // gating them on settingSources silently re-enabled auto-memory (the
       // SDK's built-in default) whenever claudeMd was "off".
       settings: {
-        autoMemoryEnabled: ctx.memory ?? true,
-        autoDreamEnabled: ctx.dreaming ?? false,
+        autoMemoryEnabled: memory ?? true,
+        autoDreamEnabled: dreaming ?? false,
       },
       // #634/#490: always explicit. Empty array → SDK emits
       // `--setting-sources=` → subprocess loads nothing. Omitting the key
@@ -349,7 +366,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(fallbackModel ? { fallbackModel } : {}),
       ...(sdkDebug ? { debug: true } : {}),
       ...(additionalDirectories && additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-      ...(ctx.advisorModel ? { advisorModel: ctx.advisorModel } : {}),
+      ...(advisorModel ? { advisorModel } : {}),
     }
   }
 }
