@@ -6,8 +6,9 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import {
+  getFeaturesForAdapter,
+  updateAdapterFeatures,
   validateFeatureUpdate,
-  type AdapterFeatures,
 } from "../proxy/sdkFeatures"
 
 // ── validateFeatureUpdate ───────────────────────────────────────────
@@ -161,6 +162,27 @@ describe("sdkFeatures config roundtrip", () => {
       config = {}
     }
     expect(config).toEqual({})
+  })
+
+  it("uses MERIDIAN_CONFIG_DIR for persisted adapter overrides", () => {
+    const savedConfigDir = process.env.MERIDIAN_CONFIG_DIR
+    process.env.MERIDIAN_CONFIG_DIR = tempDir
+
+    try {
+      updateAdapterFeatures("opencode", { codeSystemPrompt: false })
+
+      const loaded = getFeaturesForAdapter("opencode")
+      const configPath = join(tempDir, "sdk-features.json")
+
+      expect(loaded.codeSystemPrompt).toBe(false)
+      expect(existsSync(configPath)).toBe(true)
+      expect(JSON.parse(readFileSync(configPath, "utf-8"))).toEqual({
+        opencode: { codeSystemPrompt: false },
+      })
+    } finally {
+      if (savedConfigDir === undefined) delete process.env.MERIDIAN_CONFIG_DIR
+      else process.env.MERIDIAN_CONFIG_DIR = savedConfigDir
+    }
   })
 })
 
