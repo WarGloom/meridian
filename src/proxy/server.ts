@@ -139,19 +139,31 @@ function hasMultimodalContent(content: any): boolean {
   })
 }
 
-function stripCacheControlDeep(content: any): any {
+/**
+ * Upgrade existing cache_control entries to ttl "1h", or add one ttl-1h
+ * marker on the tail-most content block when none exist. Idempotent.
+ * Respects Anthropic's 4-marker per-request limit by never adding when
+ * markers already exist (only upgrading them).
+ */
+function upgradeOrAddCacheControl1h(content: any): any {
+  const TARGET = { type: "ephemeral" as const, ttl: "1h" }
+  if (typeof content === "string") {
+    return [{ type: "text", text: content, cache_control: TARGET }]
+  }
   if (!Array.isArray(content)) return content
-  return content.map((block: any) => {
-    if (!block || typeof block !== "object") return block
-    const { cache_control, ...rest } = block
-    if (block.type === "tool_result" && Array.isArray(block.content)) {
-      return {
-        ...rest,
-        content: stripCacheControlDeep(block.content),
-      }
-    }
-    return rest
-  })
+  const hasExisting = content.some((b) => b && typeof b === "object" && b.cache_control)
+  if (hasExisting) {
+    return content.map((b) =>
+      b && typeof b === "object" && b.cache_control ? { ...b, cache_control: TARGET } : b,
+    )
+  }
+  let lastIdx = -1
+  for (let i = content.length - 1; i >= 0; i--) {
+    const b = content[i]
+    if (b && typeof b === "object") { lastIdx = i; break }
+  }
+  if (lastIdx === -1) return content
+  return content.map((b, i) => (i === lastIdx ? { ...b, cache_control: TARGET } : b))
 }
 
 function normalizeStructuredUserContent(content: any): any {
@@ -245,7 +257,8 @@ function flattenUserContent(
  */
 function buildFreshPrompt(
   messages: Array<{ role: string; content: any }>,
-  sanitizeOpts: import("./sanitize").SanitizeOptions = {}
+  sanitizeOpts: import("./sanitize").SanitizeOptions = {},
+  attachCacheControl = true,
 ): string | AsyncIterable<any> {
   const hasMultimodal = messages.some((m) => hasMultimodalContent(m.content))
   const toolIndex = buildToolUseIndex(messages)
@@ -256,7 +269,7 @@ function buildFreshPrompt(
       if (m.role === "user") {
         structured.push({
           type: "user" as const,
-          message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+          message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
           parent_tool_use_id: null,
         })
       } else {
@@ -274,6 +287,17 @@ function buildFreshPrompt(
     }
     // See #553 — consolidate earlier-turn multimodal onto the final user turn.
     const prompt = structured.length > 1 ? consolidateMultimodalOntoLastUser(structured) : structured
+
+    // Attach 1h cache_control to the last user message's tail block so
+    // long idle gaps still hit cache. Strip-disabled: any upstream
+    // cache_control markers also flow through unchanged.
+    if (attachCacheControl && prompt.length > 0) {
+      const tail = prompt[prompt.length - 1]
+      if (tail?.message) {
+        tail.message.content = upgradeOrAddCacheControl1h(tail.message.content)
+      }
+    }
+
     return (async function* () { for (const msg of prompt) yield msg })()
   }
 
@@ -623,7 +647,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         } = process.env
 
         // Pin ANTHROPIC_DEFAULT_{TYPE}_MODEL before the inherited env. The
-        // Claude Agent SDK resolves the "sonnet"/"opus"/"haiku" aliases
+        // Claude Agent SDK resolves the "fable"/"sonnet"/"opus"/"haiku" aliases
         // (emitted by mapModelToClaudeModel) via these env vars; when unset
         // it falls back to its own bundled defaults, which lag real
         // availability and caused #419 (opus-* requests silently answering
@@ -631,8 +655,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // so user-provided ANTHROPIC_DEFAULT_* values still win.
         const sdkModelDefaults = resolveSdkModelDefaults()
 
-        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account)
-        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...profile.env }
+        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account).
+        // Drop undefined profile entries so they don't erase the SDK model pins.
+        const definedProfileEnv = Object.fromEntries(
+          Object.entries(profile.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+        )
+        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...definedProfileEnv }
         const profileCredentialStore = credentialStoreForProfile(profile)
 
         let systemContext = ""
@@ -720,6 +748,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Instances (#476): base-resolved features with the instance's own
         // overrides layered on top.
         const sdkFeatures = { ...getFeaturesForAdapter(adapterBase), ...(adapter.instanceFeatures ?? {}) }
+        const preserveOpenAiSystemPrompt = adapterBase === "openai"
 
         // Resolve thinking against the per-adapter setting.
         //
@@ -934,7 +963,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+                message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
                 parent_tool_use_id: null,
               })
             }
@@ -945,7 +974,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: normalizeStructuredUserContent(stripCacheControlDeep(m.content)) },
+                message: { role: "user" as const, content: normalizeStructuredUserContent(m.content) },
                 parent_tool_use_id: null,
               })
             } else {
@@ -969,6 +998,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // "I cannot see the image" (#553). Move them onto the final user turn.
         if (structuredMessages.length > 1) {
           structuredMessages = consolidateMultimodalOntoLastUser(structuredMessages)
+        }
+
+        // Attach 1h cache_control to the last user message's tail block so
+        // long idle gaps still hit cache. Strip-disabled: any upstream
+        // cache_control markers also flow through unchanged.
+        if (!preserveOpenAiSystemPrompt && structuredMessages.length > 0) {
+          const tail = structuredMessages[structuredMessages.length - 1]
+          if (tail?.message) {
+            tail.message.content = upgradeOrAddCacheControl1h(tail.message.content)
+          }
         }
       } else {
         // Text prompt — convert messages to string.
@@ -1398,7 +1437,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             //   1. Strip [1m] context (immediate, different model tier)
             //   2. Backoff retries on base model (1s, 2s — exponential)
             const MAX_RATE_LIMIT_RETRIES = 2
-            const RATE_LIMIT_BASE_DELAY_MS = 1000
+            const RATE_LIMIT_BASE_DELAY_MS = finalConfig.rateLimitBaseDelayMs
 
             const response = (async function* () {
               let rateLimitRetries = 0
@@ -1435,6 +1474,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     resumeSessionId, isUndo, undoRollbackUuid, forkSession: busySessionFork || undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                     effort, thinking, taskBudget, outputFormat, betas, settingSources,
                     codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                    clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                     sdkDebug: sdkFeatures.sdkDebug,
@@ -1503,13 +1543,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* query(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, sanitizeOpts),
+                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, !preserveOpenAiSystemPrompt),
                       model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
-                    memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
+                      clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                      memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                       sdkDebug: sdkFeatures.sdkDebug,
                       additionalDirectories: sdkFeatures.additionalDirectories
@@ -1551,12 +1592,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* query(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, sanitizeOpts),
+                      prompt: buildFreshPrompt(allMessages, sanitizeOpts, !preserveOpenAiSystemPrompt),
                       model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                      clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                       memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                       sdkDebug: sdkFeatures.sdkDebug,
@@ -1670,13 +1712,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                 // Preserve content blocks, with two passthrough-specific guards:
                 //
-                // 1. Stop-after-tool-use: in passthrough mode the SDK runs 2 turns
-                //    (maxTurns:2 is required to avoid SDK crash). Turn 1 is the real
-                //    response containing the client's tool_use blocks. Turn 2 is an
-                //    SDK artefact — Claude receives a blank tool result and generates
-                //    a prose summary ("The edit has been forwarded..."). That Turn 2
-                //    content must NOT be forwarded; it confuses the client into
-                //    showing prose instead of executing + diff-rendering the tool_use.
+                // 1. Stop-after-tool-use: passthrough gives the SDK a high enough
+                //    maxTurns ceiling to survive variable internal setup before the
+                //    real response containing the client's tool_use blocks. Any later
+                //    SDK turn is an artefact: Claude receives a blank tool result and
+                //    generates a prose summary ("The edit has been forwarded...").
+                //    That later content must NOT be forwarded; it confuses the client
+                //    into showing prose instead of executing and diff-rendering the
+                //    tool_use.
                 //
                 // 2. Strip thinking blocks: type:"thinking" / type:"redacted_thinking"
                 //    contain an encrypted signature that is only valid inside Claude's
@@ -2120,7 +2163,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               //   1. Strip [1m] context (immediate, different model tier)
               //   2. Backoff retries on base model (1s, 2s — exponential)
               const MAX_RATE_LIMIT_RETRIES = 2
-              const RATE_LIMIT_BASE_DELAY_MS = 1000
+              const RATE_LIMIT_BASE_DELAY_MS = finalConfig.rateLimitBaseDelayMs
 
               const response = (async function* () {
                 let rateLimitRetries = 0
@@ -2151,7 +2194,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       resumeSessionId, isUndo, undoRollbackUuid, forkSession: busySessionFork || undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
-                    memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
+                      clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                      memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                       sdkDebug: sdkFeatures.sdkDebug,
                       additionalDirectories: sdkFeatures.additionalDirectories
@@ -2205,13 +2249,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* query(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, sanitizeOpts),
+                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, !preserveOpenAiSystemPrompt),
                         model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
-                    memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
+                        clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                        memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                         sdkDebug: sdkFeatures.sdkDebug,
                         additionalDirectories: sdkFeatures.additionalDirectories
@@ -2249,12 +2294,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* query(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, sanitizeOpts),
+                        prompt: buildFreshPrompt(allMessages, sanitizeOpts, !preserveOpenAiSystemPrompt),
                         model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                        clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
                         sdkDebug: sdkFeatures.sdkDebug,
@@ -2983,7 +3029,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const streamErr = error instanceof UpstreamIdleError
                 ? {
                     status: 504,
-                    type: "upstream_timeout",
+                    // Anthropic clients validate/format this field; keep it within
+                    // the public Anthropic error union instead of leaking a custom
+                    // control type into visible transcripts.
+                    type: "timeout_error",
                     message: `Upstream stalled: no data for ${error.sinceLastMs}ms`,
                   }
                 : classifyError(errMsg)
@@ -3173,10 +3222,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 ), "error_message_stop")
               }
 
-              safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-                type: "error",
-                error: { type: streamErr.type, message: streamErr.message }
-              })}\n\n`), "error_event")
+              if (!(error instanceof UpstreamIdleError && messageStartEmitted)) {
+                safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+                  type: "error",
+                  error: { type: streamErr.type, message: streamErr.message }
+                })}\n\n`), "error_event")
+              }
               if (!streamClosed) {
                 try { controller.close() } catch {}
                 streamClosed = true
@@ -4164,7 +4215,13 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
       if (authKeepaliveInterval) clearInterval(authKeepaliveInterval)
       stopBackgroundRefresh()
       await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()))
+        server.close((err) => {
+          if (!err || (err as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") {
+            resolve()
+            return
+          }
+          reject(err)
+        })
       })
     },
   }

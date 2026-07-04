@@ -15,6 +15,13 @@ describe("proxy async ops", () => {
     expect(typeof proxyB.server.keepAliveTimeout).toBe("number")
   })
 
+  it("close is idempotent when the server is already stopped", async () => {
+    const proxy = await startProxyServer({ port: 0, host: "127.0.0.1" })
+
+    await proxy.close()
+    await proxy.close()
+  })
+
   it("serves async health endpoint with correct response schema", async () => {
     const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
     const response = await app.fetch(new Request("http://localhost/health"))
