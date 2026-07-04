@@ -486,6 +486,24 @@ describe("startBackgroundRefresh", () => {
     expect(fetchCalls).toBeGreaterThanOrEqual(2)
   })
 
+  it("clamps zero failure retry delay to avoid immediate retry spam", async () => {
+    const { startBackgroundRefresh } = await import("../proxy/tokenRefresh")
+    let fetchCalls = 0
+    mockFetch(() => {
+      fetchCalls++
+      return Promise.resolve(new Response("invalid_grant", { status: 400 }))
+    })
+    const { store } = makeStore({
+      ...MOCK_CREDENTIALS,
+      claudeAiOauth: { ...MOCK_CREDENTIALS.claudeAiOauth, expiresAt: Date.now() - 1000 },
+    })
+
+    startBackgroundRefresh(store, 1000, 0)
+    await tick(10)
+
+    expect(fetchCalls).toBe(1)
+  })
+
   it("does not write scheduled refresh status to stderr by default", async () => {
     const { startBackgroundRefresh } = await import("../proxy/tokenRefresh")
     const originalError = console.error
