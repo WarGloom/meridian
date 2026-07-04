@@ -94,20 +94,22 @@ const ADAPTER_DEFAULTS: Record<string, Partial<AdapterFeatures>> = {
 }
 
 function getConfigPath(): string {
-  const dir = join(homedir(), ".config", "meridian")
+  const configHome = process.env.XDG_CONFIG_HOME
+  const dir = configHome ? join(configHome, "meridian") : join(homedir(), ".config", "meridian")
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return join(dir, "sdk-features.json")
 }
 
 let cachedConfig: FeatureConfig | null = null
+let cachedConfigPath: string | null = null
 let lastReadTime = 0
 const CACHE_TTL_MS = 5000
 
 function readConfig(): FeatureConfig {
   const now = Date.now()
-  if (cachedConfig && now - lastReadTime < CACHE_TTL_MS) return cachedConfig
-
   const path = getConfigPath()
+  if (cachedConfig && cachedConfigPath === path && now - lastReadTime < CACHE_TTL_MS) return cachedConfig
+
   try {
     if (existsSync(path)) {
       cachedConfig = JSON.parse(readFileSync(path, "utf-8")) as FeatureConfig
@@ -117,6 +119,7 @@ function readConfig(): FeatureConfig {
   } catch {
     cachedConfig = {}
   }
+  cachedConfigPath = path
   lastReadTime = now
   return cachedConfig
 }
@@ -128,6 +131,7 @@ function writeConfig(config: FeatureConfig): void {
     writeFileSync(tmp, JSON.stringify(config, null, 2))
     renameSync(tmp, path)
     cachedConfig = config
+    cachedConfigPath = path
     lastReadTime = Date.now()
   } catch (e) {
     console.error("[sdk-features] write failed:", (e as Error).message)
