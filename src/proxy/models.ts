@@ -3,7 +3,7 @@
  */
 
 import { exec as execCallback, execFile as execFileCallback } from "child_process"
-import { existsSync, statSync } from "fs"
+import { existsSync, readFileSync, statSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
 import { promisify } from "util"
@@ -21,6 +21,7 @@ const execFile = promisify(execFileCallback)
  * upstream postinstall fails (see issue #445).
  */
 const STUB_SIZE_THRESHOLD = 4096
+const MIN_CLAUDE_CODE_VERSION_FOR_DEFAULT_MODELS = "2.1.197"
 
 export type ClaudeModel = "sonnet" | "sonnet[1m]" | "opus" | "opus[1m]" | "haiku" | "fable" | "fable[1m]"
 
@@ -105,16 +106,20 @@ let cachedAuthStatusAt = 0
 let cachedAuthStatusIsFailure = false
 let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
 
+export function is1mContextSupportEnabled(): boolean {
+  // Global opt-out: MERIDIAN_1M_CONTEXT_SUPPORT=0 (or false/no) disables
+  // explicit [1m] alias auto-selection and 1M model advertisement.
+  // Accepts the CLAUDE_PROXY_ alias and all falsy spellings via env().
+  const override = env("1M_CONTEXT_SUPPORT")
+  return override !== "0" && override !== "false" && override !== "no"
+}
+
 /**
- * Only Claude 4.6 models support the 1M extended context window.
+ * Claude 4.6+ and Claude 5 models support the 1M extended context window.
  * Older models (4.5 and earlier) do not.
  */
 function supports1mContext(model: string): boolean {
-  // Global opt-out: MERIDIAN_1M_CONTEXT_SUPPORT=0 (or false/no) disables 1M
-  // auto-selection entirely, downgrading every model to its base variant.
-  // Accepts the CLAUDE_PROXY_ alias and all falsy spellings via env().
-  const override = env("1M_CONTEXT_SUPPORT")
-  if (override === "0" || override === "false" || override === "no") return false
+  if (!is1mContextSupportEnabled()) return false
   // Explicit older versions (4-5, 4.5, etc.) do not support 1M
   if (model.includes("4-5") || model.includes("4.5")) return false
   // Everything else (bare names, 4-6, unknown) defaults to latest (1M capable)
@@ -122,9 +127,10 @@ function supports1mContext(model: string): boolean {
 }
 
 export function mapModelToClaudeModel(model: string, subscriptionType?: string | null, agentMode?: string | null): ClaudeModel {
-  if (model.includes("haiku")) return "haiku"
+  const normalized = model.toLowerCase()
+  if (normalized.includes("haiku")) return "haiku"
 
-  const use1m = supports1mContext(model)
+  const use1m = supports1mContext(normalized)
   // Subagents handle focused subtasks and don't benefit from 1M context.
   // Using the base model preserves rate limit budget for the primary agent.
   const isSubagent = agentMode === "subagent"
@@ -141,7 +147,7 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
   // it here (instead of the sonnet fallthrough) keeps explicit mythos requests
   // on the right tier; server.ts pins ANTHROPIC_DEFAULT_FABLE_MODEL to the
   // requested claude-mythos-* id so the concrete model passes through verbatim.
-  if (model.includes("fable") || model.includes("mythos")) {
+  if (normalized.includes("fable") || normalized.includes("mythos")) {
     if (use1m && !isSubagent && !isExtendedContextKnownUnavailable()) return "fable[1m]"
     return "fable"
   }
@@ -152,15 +158,13 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
   // NOTE: There is a known upstream bug (anthropics/claude-code#39841) where
   // Claude Code currently gates opus[1m] behind Extra Usage even on Max.
   // We follow the documented behavior; the bug is Anthropic's to fix.
-  if (model.includes("opus")) {
+  if (normalized.includes("opus")) {
     if (use1m && !isSubagent && !isExtendedContextKnownUnavailable()) return "opus[1m]"
     return "opus"
   }
 
-  // Sonnet [1m]: requires Extra Usage on Max plans per Anthropic docs.
-  // Unlike Opus, Sonnet 1M is NOT included with the Max subscription —
-  // it is always billed as Extra Usage. Default to sonnet (200k) to
-  // avoid unexpected charges. Users opt in via MERIDIAN_SONNET_MODEL=sonnet[1m].
+  // Sonnet 5 has a native 1M context window. The explicit sonnet[1m] alias is
+  // still supported for older pinned Sonnet models and LLM gateway setups.
   const sonnetOverride = process.env.MERIDIAN_SONNET_MODEL ?? process.env.CLAUDE_PROXY_SONNET_MODEL
   if (sonnetOverride === "sonnet[1m]") {
     if (!use1m || isSubagent || isExtendedContextKnownUnavailable()) return "sonnet"
@@ -368,6 +372,7 @@ let cachedClaudePathPromise: Promise<string> | null = null
  */
 type ResolverDeps = {
   existsSync: (p: string) => boolean
+  readFileSync: (p: string, encoding: BufferEncoding) => string
   statSync: (p: string) => { size: number }
   exec: (cmd: string) => Promise<{ stdout: string }>
   resolvePackage: (specifier: string) => string
@@ -379,6 +384,7 @@ type ResolverDeps = {
 
 const DEFAULT_DEPS: ResolverDeps = {
   existsSync,
+  readFileSync,
   statSync: (p) => statSync(p),
   exec,
   resolvePackage: (specifier) => fileURLToPath(import.meta.resolve(specifier)),
@@ -386,6 +392,33 @@ const DEFAULT_DEPS: ResolverDeps = {
   platform: process.platform,
   arch: process.arch,
   isBun: typeof process.versions.bun !== "undefined",
+}
+
+function compareSemver(a: string, b: string): number {
+  const parse = (version: string) => {
+    const match = version.match(/^(\d+)\.(\d+)\.(\d+)/)
+    if (!match) return null
+    return [Number(match[1]), Number(match[2]), Number(match[3])] as const
+  }
+  const parsedA = parse(a)
+  const parsedB = parse(b)
+  if (!parsedA || !parsedB) return 0
+  const [majorA, minorA, patchA] = parsedA
+  const [majorB, minorB, patchB] = parsedB
+  if (majorA !== majorB) return majorA - majorB
+  if (minorA !== minorB) return minorA - minorB
+  return patchA - patchB
+}
+
+function hasClaude5CapablePackageVersion(deps: ResolverDeps, pkgJsonPath: string): boolean {
+  try {
+    const pkg = JSON.parse(deps.readFileSync(pkgJsonPath, "utf-8")) as { version?: unknown }
+    if (typeof pkg.version !== "string") return true
+    return compareSemver(pkg.version, MIN_CLAUDE_CODE_VERSION_FOR_DEFAULT_MODELS) >= 0
+  } catch {
+    // Do not reject unusual package layouts just because metadata is unreadable.
+    return true
+  }
 }
 
 /**
@@ -410,6 +443,7 @@ function tryEnvOverride(deps: ResolverDeps): string | null {
 function tryBundledBinary(deps: ResolverDeps): string | null {
   try {
     const pkgPath = deps.resolvePackage("@anthropic-ai/claude-code/package.json")
+    if (!hasClaude5CapablePackageVersion(deps, pkgPath)) return null
     const bundled = join(dirname(pkgPath), "bin", "claude.exe")
     if (!deps.existsSync(bundled)) return null
     const size = deps.statSync(bundled).size
@@ -443,6 +477,7 @@ function tryPlatformPackage(deps: ResolverDeps): string | null {
   for (const pkg of candidates) {
     try {
       const pkgJson = deps.resolvePackage(`${pkg}/package.json`)
+      if (!hasClaude5CapablePackageVersion(deps, pkgJson)) continue
       const candidate = join(dirname(pkgJson), binName)
       if (deps.existsSync(candidate)) return candidate
     } catch {

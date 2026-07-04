@@ -1,7 +1,7 @@
 /**
  * Unit tests for model mapping and utility functions.
  */
-import { afterEach, beforeEach, describe, it, expect, mock } from "bun:test"
+import { afterEach, beforeEach, describe, it, expect } from "bun:test"
 
 import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, stripExtendedContext, hasExtendedContext, recordExtendedContextUnavailable, isExtendedContextKnownUnavailable, resetExtendedContextUnavailable, resolveSdkModelDefaults, CANONICAL_FABLE_MODEL, CANONICAL_OPUS_MODEL, CANONICAL_SONNET_MODEL, CANONICAL_HAIKU_MODEL } from "../proxy/models"
 
@@ -32,8 +32,8 @@ describe("mapModelToClaudeModel", () => {
     expect(mapModelToClaudeModel("haiku")).toBe("haiku")
   })
 
-  it("maps sonnet 4.6 models to sonnet (200k) for max subscriptions by default", () => {
-    // Sonnet [1m] requires Extra Usage on Max — default to 200k to avoid charges
+  it("maps sonnet models to sonnet by default", () => {
+    expect(mapModelToClaudeModel("claude-sonnet-5", "max")).toBe("sonnet")
     expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
   })
@@ -236,6 +236,7 @@ describe("hasExtendedContext", () => {
   })
 
   it("returns false for base models", () => {
+    expect(hasExtendedContext("fable")).toBe(false)
     expect(hasExtendedContext("opus")).toBe(false)
     expect(hasExtendedContext("sonnet")).toBe(false)
     expect(hasExtendedContext("haiku")).toBe(false)
@@ -260,10 +261,9 @@ describe("Extra Usage cooldown", () => {
     expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
   })
 
-  it("sonnet stays sonnet even when cooldown is cleared (default is 200k)", () => {
+  it("legacy sonnet stays on the base sonnet alias when cooldown is cleared", () => {
     recordExtendedContextUnavailable()
     resetExtendedContextUnavailable()
-    // Sonnet defaults to 200k now — [1m] requires explicit opt-in
     expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
   })
 
@@ -338,6 +338,11 @@ describe("resolveSdkModelDefaults", () => {
     expect(pins.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(CANONICAL_HAIKU_MODEL)
   })
 
+  it("MERIDIAN_DEFAULT_FABLE_MODEL override wins over the canonical default", () => {
+    const pins = resolveSdkModelDefaults({ MERIDIAN_DEFAULT_FABLE_MODEL: "claude-fable-custom" })
+    expect(pins.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("claude-fable-custom")
+  })
+
   it("MERIDIAN_DEFAULT_OPUS_MODEL override wins over the canonical default", () => {
     const pins = resolveSdkModelDefaults({ MERIDIAN_DEFAULT_OPUS_MODEL: "claude-opus-5-0" })
     expect(pins.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5-0")
@@ -351,11 +356,6 @@ describe("resolveSdkModelDefaults", () => {
   it("MERIDIAN_DEFAULT_HAIKU_MODEL override wins over the canonical default", () => {
     const pins = resolveSdkModelDefaults({ MERIDIAN_DEFAULT_HAIKU_MODEL: "claude-haiku-5-0" })
     expect(pins.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-haiku-5-0")
-  })
-
-  it("MERIDIAN_DEFAULT_FABLE_MODEL override wins over the canonical default", () => {
-    const pins = resolveSdkModelDefaults({ MERIDIAN_DEFAULT_FABLE_MODEL: "claude-fable-6" })
-    expect(pins.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("claude-fable-6")
   })
 
   it("returns only the four ANTHROPIC_DEFAULT_* keys — nothing else", () => {
@@ -372,6 +372,7 @@ describe("resolveSdkModelDefaults", () => {
     // Smoke test that the no-arg path still works — value is unspecified but
     // shape must be correct.
     const pins = resolveSdkModelDefaults()
+    expect(typeof pins.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe("string")
     expect(typeof pins.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("string")
     expect(typeof pins.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("string")
     expect(typeof pins.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("string")

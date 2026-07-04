@@ -1193,37 +1193,40 @@ describe("buildModelList", () => {
     const ids = buildModelList(true).map(m => m.id)
     expect(ids).toContain("claude-sonnet-5")
     expect(ids).toContain("claude-fable-5")
+    expect(ids).toContain("claude-sonnet-5")
     expect(ids).toContain("claude-opus-4-6")
     expect(ids).toContain("claude-opus-4-7")
     expect(ids).toContain("claude-opus-4-8")
   })
 
-  it("Max subscription gets 1M context for fable, 200k otherwise", () => {
-    const fableMax = buildModelList(true).find(m => m.id === "claude-fable-5")!
-    const fableFree = buildModelList(false).find(m => m.id === "claude-fable-5")!
-    expect(fableMax.context_window).toBe(1_000_000)
-    expect(fableFree.context_window).toBe(200_000)
-  })
-
-  it("Max subscription gets 1M context for all opus variants, 200k for sonnet", () => {
+  it("Max subscription gets 1M context for fable and sonnet-5, with opuses at 1M and legacy sonnet-4-6 at 200k", () => {
     const models = buildModelList(true)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
+    const fable = models.find(m => m.id === "claude-fable-5")!
+    const sonnet5 = models.find(m => m.id === "claude-sonnet-5")!
+    const sonnet46 = models.find(m => m.id === "claude-sonnet-4-6")!
     const opus46 = models.find(m => m.id === "claude-opus-4-6")!
     const opus47 = models.find(m => m.id === "claude-opus-4-7")!
     const opus48 = models.find(m => m.id === "claude-opus-4-8")!
-    expect(sonnet.context_window).toBe(200_000)
+
+    expect(fable.context_window).toBe(1_000_000)
+    expect(sonnet5.context_window).toBe(1_000_000)
+    expect(sonnet46.context_window).toBe(200_000)
     expect(opus46.context_window).toBe(1_000_000)
     expect(opus47.context_window).toBe(1_000_000)
     expect(opus48.context_window).toBe(1_000_000)
   })
 
-  it("non-Max gets 200k context for sonnet and all opus variants", () => {
+  it("non-Max gets advertised context for current and legacy models", () => {
     const models = buildModelList(false)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
+    const fable = models.find(m => m.id === "claude-fable-5")!
+    const sonnet5 = models.find(m => m.id === "claude-sonnet-5")!
+    const sonnet46 = models.find(m => m.id === "claude-sonnet-4-6")!
     const opus46 = models.find(m => m.id === "claude-opus-4-6")!
     const opus47 = models.find(m => m.id === "claude-opus-4-7")!
     const opus48 = models.find(m => m.id === "claude-opus-4-8")!
-    expect(sonnet.context_window).toBe(200_000)
+    expect(fable.context_window).toBe(1_000_000)
+    expect(sonnet5.context_window).toBe(1_000_000)
+    expect(sonnet46.context_window).toBe(200_000)
     expect(opus46.context_window).toBe(200_000)
     expect(opus47.context_window).toBe(200_000)
     expect(opus48.context_window).toBe(200_000)
@@ -1255,6 +1258,13 @@ describe("buildModelList", () => {
     expect(caps.thinking.supported).toBe(true)
     expect(caps.thinking.types.adaptive.supported).toBe(true)
     expect(caps.thinking.types.enabled.supported).toBe(true)
+  })
+
+  it("advertises 200k context when 1M context support is disabled", () => {
+    const models = buildModelList(true, 123, false)
+    expect(models.find(m => m.id === "claude-fable-5")!.context_window).toBe(200_000)
+    expect(models.find(m => m.id === "claude-sonnet-5")!.context_window).toBe(200_000)
+    expect(models.find(m => m.id === "claude-opus-4-8")!.context_window).toBe(200_000)
   })
 
   it("haiku is always 200k regardless of subscription", () => {
