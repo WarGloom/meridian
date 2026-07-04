@@ -165,7 +165,7 @@ The Claude Agent SDK provides programmatic access to Claude. But your favorite c
 - **Session management** — conversations persist across requests, survive compaction and undo, resume after proxy restarts
 - **Streaming** — full SSE streaming with MCP tool filtering
 - **Concurrent sessions** — run parent and subagent requests in parallel
-- **Subagent model selection** — primary agents get 1M context; subagents get 200k, preserving rate-limit budget
+- **Subagent model selection** — extended-context opt-ins stay on primary agents; subagents use base models to preserve rate-limit budget
 - **Auto token refresh** — expired OAuth tokens are refreshed automatically; requests continue without interruption
 - **Passthrough mode** — forward tool calls to the client instead of executing internally
 - **Multimodal** — images, documents, file attachments, and multimodal tool results pass through to Claude
@@ -235,8 +235,8 @@ For large tool sets (>15 tools), non-core tools are automatically deferred via t
 
 ### Known limitations
 
-- **Single tool round-trip per request** — in passthrough mode, the SDK is configured with `maxTurns=3` (or 4 for deferred tools). Multi-step agentic loops where Claude needs several consecutive tool calls require the client to re-send after each round.
-- **Blocked tools** — 10 built-in SDK tools (Read, Write, Bash, etc.) are blocked to prevent conflicts with the client's own tools. 19 additional Claude Code-only tools (CronCreate, EnterWorktree, Agent, etc.) are blocked because they require capabilities that external clients don't support.
+- **Single tool round-trip per request** — in passthrough mode, the SDK uses a fixed `maxTurns=30` safety ceiling so variable internal SDK setup does not fail prematurely. Meridian still returns only the first client-facing tool round trip. Multi-step agentic loops where Claude needs several consecutive tool calls require the client to re-send after each round.
+- **Blocked tools** — 10 built-in SDK tools (Read, Write, Bash, etc.) are blocked to prevent conflicts with the client's own tools. 19 Claude Code-only or schema-incompatible SDK tools (CronCreate, EnterWorktree, Agent, etc.) are also blocked because external clients don't support them or expect different tool schemas.
 - **Subagent extraction** — Meridian parses the client's Task tool description to extract subagent names and build SDK AgentDefinitions. If the client's agent framework uses a non-standard format, subagent routing may not work automatically.
 - **Scratchpad suppression (passthrough)** — the Claude CLI advertises a proxy-host scratchpad directory that clients can't use; OpenCode 1.18+ permission-blocks writes to it. Meridian suppresses it in passthrough mode (`CLAUDE_CODE_SESSION_KIND=bg` on the subprocess). Kill switch: `MERIDIAN_SUPPRESS_SCRATCHPAD=0`.
 - **Anthropic server tools not supported** — native server-side tools (`web_search_*`, `web_fetch_*`) are a raw Anthropic API feature (billed to an API key) that emits `server_tool_use` / `web_search_tool_result` blocks the Claude Max / Agent SDK path cannot produce. A request carrying one is rejected with a `400` explaining the fix. If a plugin needs server-side web search (e.g. [`opencode-websearch`](https://github.com/emilsvennesson/opencode-websearch)), give it its **own** provider pointed at `https://api.anthropic.com` with your `ANTHROPIC_API_KEY` — don't route that call through Meridian.
@@ -384,7 +384,7 @@ meridian setup
 This adds the Meridian plugin to your OpenCode global config (`~/.config/opencode/opencode.json`). The plugin enables:
 
 - **Session tracking** — reliable conversation continuity across requests
-- **Safe model defaults** — Opus uses 1M context (included with Max subscription); Sonnet uses 200k to avoid Extra Usage charges ([details](#configuration))
+- **Safe model defaults** — Opus and Sonnet use 200k context by default to avoid Extra Usage gates; 1M context is explicit opt-in ([details](#configuration))
 - **Subagent model selection** — subagents automatically use `sonnet`/`opus` (200k), preserving rate-limit budget
 
 If the plugin is missing, Meridian warns at startup and reports `"plugin": "not-configured"` in the health endpoint.
@@ -424,11 +424,12 @@ Add a provider to `~/.config/crush/crush.json`:
       "base_url": "http://127.0.0.1:3456",
       "api_key": "dummy",
       "models": [
-        { "id": "claude-fable-5",    "name": "Claude Fable 5 (1M)",     "context_window": 1000000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-fable-5",   "name": "Claude Fable 5 (Meridian)",   "context_window": 1000000, "default_max_tokens": 128000, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-sonnet-5",  "name": "Claude Sonnet 5 (Meridian)",  "context_window": 1000000, "default_max_tokens": 128000, "can_reason": true, "supports_attachments": true },
         { "id": "claude-opus-4-8",   "name": "Claude Opus 4.8 (1M)",    "context_window": 1000000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
         { "id": "claude-opus-4-7",   "name": "Claude Opus 4.7 (1M)",    "context_window": 1000000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
-        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (1M)",  "context_window": 1000000, "default_max_tokens": 64000, "can_reason": true, "supports_attachments": true },
-        { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6 (1M)",    "context_window": 1000000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (Meridian)", "context_window": 200000, "default_max_tokens": 64000, "can_reason": true, "supports_attachments": true },
+        { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6 (Meridian)",   "context_window": 200000, "default_max_tokens": 32768, "can_reason": true, "supports_attachments": true },
         { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "context_window": 200000,  "default_max_tokens": 16384, "can_reason": true, "supports_attachments": true }
       ]
     }
@@ -437,7 +438,7 @@ Add a provider to `~/.config/crush/crush.json`:
 ```
 
 ```bash
-crush run --model meridian/claude-sonnet-4-6 "refactor this function"
+crush run --model meridian/claude-sonnet-5 "refactor this function"
 crush --model meridian/claude-opus-4-6       # interactive TUI
 ```
 
@@ -450,7 +451,8 @@ Add Meridian as a custom model provider in `~/.factory/settings.json`:
 ```json
 {
   "customModels": [
-    { "model": "claude-fable-5",          "name": "Fable 5 (Meridian)",    "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
+    { "model": "claude-fable-5",         "name": "Fable 5 (Meridian)",    "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
+    { "model": "claude-sonnet-5",        "name": "Sonnet 5 (Meridian)",   "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
     { "model": "claude-opus-4-8",         "name": "Opus 4.8 (Meridian)",   "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
     { "model": "claude-opus-4-7",         "name": "Opus 4.7 (Meridian)",   "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
     { "model": "claude-sonnet-4-6",       "name": "Sonnet 4.6 (Meridian)", "provider": "anthropic", "baseUrl": "http://127.0.0.1:3456", "apiKey": "x" },
@@ -467,7 +469,7 @@ Then pick any `custom:claude-*` model in the Droid TUI. No plugin needed — Dro
 **1. Authenticate:**
 
 ```bash
-cline auth --provider anthropic --apikey "dummy" --modelid "claude-sonnet-4-6"
+cline auth --provider anthropic --apikey "dummy" --modelid "claude-sonnet-5"
 ```
 
 **2. Set the proxy URL** in `~/.cline/data/globalState.json`:
@@ -476,7 +478,7 @@ cline auth --provider anthropic --apikey "dummy" --modelid "claude-sonnet-4-6"
 {
   "anthropicBaseUrl": "http://127.0.0.1:3456",
   "actModeApiProvider": "anthropic",
-  "actModeApiModelId": "claude-sonnet-4-6"
+  "actModeApiModelId": "claude-sonnet-5"
 }
 ```
 
@@ -492,7 +494,7 @@ No plugin needed — Cline uses the standard Anthropic SDK.
 
 ```bash
 ANTHROPIC_API_KEY=x ANTHROPIC_BASE_URL=http://127.0.0.1:3456 \
-  aider --model anthropic/claude-sonnet-4-6
+  aider --model anthropic/claude-sonnet-5
 ```
 
 > **Note:** `--no-stream` is incompatible due to a litellm parsing issue — use the default streaming mode.
@@ -800,8 +802,8 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `MERIDIAN_IDLE_TIMEOUT_SECONDS` | `CLAUDE_PROXY_IDLE_TIMEOUT_SECONDS` | `120` | HTTP keep-alive timeout |
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
-| `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†) |
-| `MERIDIAN_1M_CONTEXT_SUPPORT` | `CLAUDE_PROXY_1M_CONTEXT_SUPPORT` | unset | Set to `0`/`false`/`no` to disable 1M context entirely — every model resolves to its 200k base variant, so Meridian never requests the extended window (avoids Extra Usage on 1M). |
+| `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet alias selection: `sonnet` resolves to Sonnet 5 by default; `sonnet[1m]` is only needed for gateway or older pinned-model setups |
+| `MERIDIAN_1M_CONTEXT_SUPPORT` | `CLAUDE_PROXY_1M_CONTEXT_SUPPORT` | unset | Set to `0`/`false`/`no` to disable explicit 1M alias selection and 1M model advertisement — Opus/Fable downgrade to their base variants, and `sonnet[1m]` downgrades to `sonnet`. |
 | `MERIDIAN_DEFAULT_AGENT` | — | `opencode` | Default adapter for unrecognized agents: `opencode`, `forgecode`, `pi`, `crush`, `droid`, `cherry`, `claudecode`, `passthrough`. Requires restart. |
 | `MERIDIAN_ROUTING` | — | `active` | Session-to-profile routing: `active` (all traffic to the active profile) or `sticky` ([sticky session routing](#sticky-session-routing)) |
 | `MERIDIAN_PASSTHROUGH_EARLY_STOP` | — | `1` | Set to `0` to disable [digest-turn elimination](#how-tool-calling-works-in-passthrough) and restore the old end-of-turn behavior |
@@ -822,7 +824,7 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `MERIDIAN_PLUGIN_DIR` | — | `~/.config/meridian/plugins` | Plugin auto-discovery directory |
 | `MERIDIAN_PLUGIN_CONFIG` | — | `~/.config/meridian/plugins.json` | Plugin manifest path |
 
-†Sonnet 1M requires Extra Usage on all plans including Max ([docs](https://code.claude.com/docs/en/model-config#extended-context)). Opus 1M is included with Max/Team/Enterprise at no extra cost.
+†Opus 1M is documented as included with Max/Team/Enterprise, but Claude Code may still gate it behind Extra Usage on some accounts. If that happens, Meridian falls back to base Opus for the cooldown window.
 
 ## Endpoints
 
@@ -1041,7 +1043,7 @@ This error class ([#516](https://github.com/rynfar/meridian/issues/516), histori
 If you still hit the error on a current release, first check `GET /v1/usage/quota` to rule out genuinely exhausted quota, then try disabling the connecting client's system prompt for the affected adapter while keeping the Claude Code prompt enabled (in the `/settings` UI under **SDK Feature Toggles**, or `PATCH /settings/api/features/<adapter>` with `{"clientSystemPrompt":false,"codeSystemPrompt":true}`) — and please report it on [#516](https://github.com/rynfar/meridian/issues/516) with your plan type, since remaining occurrences are likely account-cohort specific (Team plans are treated differently by the API).
 
 **I'm hitting rate limits on 1M context. What do I do?**
-Meridian defaults Sonnet to 200k context because Sonnet 1M is always billed as Extra Usage on Max plans — even when regular usage isn't exhausted. This is [Anthropic's intended billing model](https://code.claude.com/docs/en/model-config#extended-context), not a bug. Set `MERIDIAN_SONNET_MODEL=sonnet[1m]` to opt in if you have Extra Usage enabled and understand the billing implications. Opus defaults to 1M context, which is included with Max/Team/Enterprise subscriptions at no extra cost. Note: there is a [known upstream bug](https://github.com/anthropics/claude-code/issues/39841) where Claude Code incorrectly gates Opus 1M behind Extra Usage on Max — this is Anthropic's to fix.
+Meridian defaults Sonnet to Sonnet 5, which has a native 1M context window. For lower-context usage, request an older pinned Sonnet model such as `claude-sonnet-4-6`, or use Haiku for lightweight work. Claude Code can also gate Opus 1M despite documentation saying it is included for Max/Team/Enterprise; if that happens, Meridian falls back to base Opus for the cooldown window.
 
 To turn off 1M context entirely for **every** model (so Meridian never requests the extended window), set `MERIDIAN_1M_CONTEXT_SUPPORT=0`. Meridian also auto-detects the "out of extra usage" error, falls back to the 200k model, and skips 1M for an hour — so it self-heals after the first occurrence even without the env var.
 
