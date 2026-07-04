@@ -36,7 +36,7 @@ export function classifyError(errMsg: string): ClassifiedError {
   // Rate limiting
   if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")) {
     const hint = lower.includes("1m") || lower.includes("context")
-      ? " If you're frequently hitting this, set MERIDIAN_SONNET_MODEL=sonnet to use the 200k model instead."
+      ? " If you're frequently hitting this, request an older pinned Sonnet model such as claude-sonnet-4-6, or use Haiku for lightweight work."
       : ""
     return {
       status: 429,
@@ -196,7 +196,8 @@ export function isRateLimitError(errMsg: string): boolean {
  */
 export function isExtraUsageRequiredError(errMsg: string): boolean {
   const lower = errMsg.toLowerCase()
-  return (lower.includes("extra usage") && lower.includes("1m")) || lower.includes("out of extra usage")
+  if (!lower.includes("extra usage")) return false
+  return lower.includes("1m") || lower.includes("out of extra usage") || lower.includes("required") || lower.includes("add more")
 }
 
 /**

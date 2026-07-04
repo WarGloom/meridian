@@ -215,6 +215,12 @@ describe("classifyError", () => {
       expect(isExtraUsageRequiredError("extra usage is required for 1m context")).toBe(true)
     })
 
+    it("detects quota exhaustion without a 1m marker", () => {
+      expect(isExtraUsageRequiredError(
+        "Claude Code returned an error result: API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"You're out of extra usage. Add more at claude.ai/settings/usage and keep going.\"}}"
+      )).toBe(true)
+    })
+
     it("detects 'out of extra usage' variant", () => {
       expect(isExtraUsageRequiredError(
         "Claude Code returned an error result: API Error: 400 You're out of extra usage."
@@ -226,7 +232,7 @@ describe("classifyError", () => {
       expect(isExtraUsageRequiredError("authentication failed")).toBe(false)
     })
 
-    it("returns false when only 'extra usage' but no '1m'", () => {
+    it("returns false when only 'extra usage' but no failure wording", () => {
       expect(isExtraUsageRequiredError("extra usage enabled")).toBe(false)
     })
 
