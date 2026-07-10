@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { rateLimitStore } from "./rateLimitStore"
 import { guardUpstreamIdle, UpstreamIdleError } from "./streamIdleGuard"
+import { linkRequestAbort } from "./requestAbort"
 import { fetchOAuthUsage } from "./oauthUsage"
 import { resolveSdkWorkingDirectory } from "./cwd"
 import type { Context } from "hono"
@@ -435,6 +436,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     requestMeta: { requestId: string; endpoint: string; queueEnteredAt: number; queueStartedAt: number }
   ) => {
     const requestStartAt = Date.now()
+    const requestAbort = linkRequestAbort(c.req.raw.signal)
+    let streamOwnsAbortLink = false
 
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
       // Hoist adapter detection before try so it's available in the catch block for telemetry
@@ -1150,7 +1153,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                       : undefined,
                     advisorModel,
-                  }))) {
+                  }, requestAbort.controller))) {
                     // Capture Claude Max subscription quota updates emitted by
                     // the SDK as rate_limit_event. We snapshot them in a process-wide
                     // store so /v1/usage/quota can return the latest live state.
@@ -1197,7 +1200,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }))
+                    }, requestAbort.controller))
                     return
                   }
 
@@ -1245,7 +1248,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }))
+                    }, requestAbort.controller))
                     return
                   }
 
@@ -1696,7 +1699,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
-                    }))) {
+                    }, requestAbort.controller))) {
                       // Same SDK rate-limit capture as the non-stream path.
                       if ((event as any).type === "rate_limit_event") {
                         rateLimitStore.record((event as any).rate_limit_info)
@@ -1738,7 +1741,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }))
+                      }, requestAbort.controller))
                       return
                     }
 
@@ -1782,7 +1785,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
-                      }))
+                      }, requestAbort.controller))
                       return
                     }
 
@@ -2508,11 +2511,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 try { controller.close() } catch {}
                 streamClosed = true
               }
+            } finally {
+              requestAbort.detach()
             }
-          }
+          },
+          cancel(reason) {
+            requestAbort.abort(reason)
+            requestAbort.detach()
+          },
         })
 
         const streamSessionId = resumeSessionId || `session_${Date.now()}`
+        streamOwnsAbortLink = true
         return new Response(readable, {
           headers: {
             "Content-Type": "text/event-stream",
@@ -2575,6 +2585,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           JSON.stringify({ type: "error", error: { type: classified.type, message: classified.message } }),
           { status: classified.status, headers: { "Content-Type": "application/json" } }
         )
+      } finally {
+        if (!streamOwnsAbortLink) requestAbort.detach()
       }
     })
   }

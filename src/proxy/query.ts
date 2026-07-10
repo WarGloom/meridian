@@ -220,7 +220,7 @@ function resolveSystemPrompt(
   return {}
 }
 
-export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
+export function buildQueryOptions(ctx: QueryContext, abortController?: AbortController): BuildQueryResult {
   const {
     prompt, model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv, hasDeferredTools,
@@ -247,6 +247,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
+      ...(abortController ? { abortController } : {}),
       ...(stream ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
