@@ -56,6 +56,7 @@ import { requireAuth, authEnabled } from "./auth"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { normalizeEffort } from "./effort"
+import { parseOutputFormat, structuredOutputText } from "./structuredOutput"
 import { runTransformHook, buildPipeline, createRequestContext } from "./transform"
 import { getAdapterTransforms } from "./transforms/registry"
 import { loadPlugins, getActiveTransforms } from "./plugins/loader"
@@ -464,6 +465,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           )
         }
 
+        const parsedOutputFormat = parseOutputFormat(body.output_config, body.tools)
+        if (!parsedOutputFormat.ok) {
+          return c.json(
+            { type: "error", error: { type: "invalid_request_error", message: parsedOutputFormat.message } },
+            400
+          )
+        }
+        const outputFormat = parsedOutputFormat.value
+
         // Resolve profile: header > active > default > first configured
         const profile = resolveProfile(
           finalConfig.profiles,
@@ -579,7 +589,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const stream = pipelineCtx.prefersStreaming !== undefined ? pipelineCtx.prefersStreaming : (body.stream ?? false)
 
         // --- SDK parameter passthrough ---
-        // Extract effort, thinking, taskBudget from body (standard Anthropic API fields).
+        // Extract effort, thinking, taskBudget, and native structured output
+        // from standard Anthropic API fields.
         // Header overrides take precedence over body values.
         const effortHeader = c.req.header("x-opencode-effort")
         const thinkingHeader = c.req.header("x-opencode-thinking")
@@ -1082,6 +1093,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         if (!stream) {
           const contentBlocks: Array<Record<string, unknown>> = []
           let assistantMessages = 0
+          let hasStructuredOutput = false
+          let structuredOutput: unknown
           const upstreamStartAt = Date.now()
           let firstChunkAt: number | undefined
           let currentSessionId: string | undefined
@@ -1144,7 +1157,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                    effort, thinking, taskBudget, betas, settingSources,
+                    effort, thinking, taskBudget, outputFormat, betas, settingSources,
                     codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1191,7 +1204,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                      effort, thinking, taskBudget, betas, settingSources,
+                      effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1239,7 +1252,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                      effort, thinking, taskBudget, betas, settingSources,
+                      effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                       memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1393,6 +1406,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (resultUsage) {
                   lastUsage = { ...lastUsage, ...resultUsage }
                 }
+                if (outputFormat && "structured_output" in message) {
+                  hasStructuredOutput = true
+                  structuredOutput = message.structured_output
+                }
               }
             }
 
@@ -1455,6 +1472,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               })
               throw error
             }
+          }
+
+          if (outputFormat) {
+            if (!hasStructuredOutput) {
+              throw new Error("Structured output was requested but the SDK returned no structured_output result")
+            }
+            contentBlocks.splice(0, contentBlocks.length, {
+              type: "text",
+              text: structuredOutputText(structuredOutput),
+            })
           }
 
           // In passthrough mode, merge captured tool_use blocks from the hook.
@@ -1654,6 +1681,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
             let messageStartEmitted = false
             let lastUsage: TokenUsage | undefined
+            let hasStructuredOutput = false
+            let structuredOutput: unknown
             // Hoisted out of the inner streaming loop so the outer catch can
             // dedupe captured tool_uses against what was already forwarded
             // when recovering gracefully from max_turns (see catch below).
@@ -1690,7 +1719,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                      effort, thinking, taskBudget, betas, settingSources,
+                      effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                       maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1732,7 +1761,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                        effort, thinking, taskBudget, betas, settingSources,
+                        effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1776,7 +1805,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
-                        effort, thinking, taskBudget, betas, settingSources,
+                        effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, fallbackModel: sdkFeatures.fallbackModel,
@@ -1894,6 +1923,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   if (message.type === "assistant" && (message as any).uuid) {
                     sdkUuidMap.push((message as any).uuid)
                   }
+                  if (message.type === "result") {
+                    const resultUsage = (message as { usage?: unknown }).usage as TokenUsage | undefined
+                    if (resultUsage) lastUsage = { ...lastUsage, ...resultUsage }
+                    if (outputFormat && "structured_output" in message) {
+                      hasStructuredOutput = true
+                      structuredOutput = message.structured_output
+                    }
+                  }
 
                   if (message.type === "stream_event") {
                     streamEventsSeen += 1
@@ -1909,6 +1946,20 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     const event = message.event
                     const eventType = (event as any).type
                     const eventIndex = (event as any).index as number | undefined
+
+                    // Native structured output is validated only on the SDK's
+                    // final result message. Buffer its partial wire events and
+                    // emit one valid Anthropic SSE message after validation.
+                    if (outputFormat) {
+                      if (eventType === "message_start") {
+                        const startUsage = (event as unknown as { message?: { usage?: TokenUsage } }).message?.usage
+                        if (startUsage) lastUsage = { ...lastUsage, ...startUsage }
+                      } else if (eventType === "message_delta") {
+                        const deltaUsage = (event as unknown as { usage?: TokenUsage }).usage
+                        if (deltaUsage) lastUsage = { ...lastUsage, ...deltaUsage }
+                      }
+                      continue
+                    }
 
                     // Track MCP tool blocks (mcp__opencode__*) — these are internal tools
                     // that the SDK executes. Don't forward them to OpenCode.
@@ -2103,6 +2154,56 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
               } finally {
                 clearInterval(heartbeat)
+              }
+
+              if (outputFormat) {
+                if (!hasStructuredOutput) {
+                  throw new Error("Structured output was requested but the SDK returned no structured_output result")
+                }
+                const text = structuredOutputText(structuredOutput)
+                const messageId = `msg_${Date.now()}`
+                safeEnqueue(encoder.encode(
+                  `event: message_start\ndata: ${JSON.stringify({
+                    type: "message_start",
+                    message: {
+                      id: messageId,
+                      type: "message",
+                      role: "assistant",
+                      content: [],
+                      model: body.model,
+                      stop_reason: null,
+                      stop_sequence: null,
+                      usage: { input_tokens: lastUsage?.input_tokens ?? 0, output_tokens: 0 },
+                    },
+                  })}\n\n`
+                ), "structured_message_start")
+                safeEnqueue(encoder.encode(
+                  `event: content_block_start\ndata: ${JSON.stringify({
+                    type: "content_block_start",
+                    index: 0,
+                    content_block: { type: "text", text: "" },
+                  })}\n\n`
+                ), "structured_block_start")
+                safeEnqueue(encoder.encode(
+                  `event: content_block_delta\ndata: ${JSON.stringify({
+                    type: "content_block_delta",
+                    index: 0,
+                    delta: { type: "text_delta", text },
+                  })}\n\n`
+                ), "structured_text_delta")
+                safeEnqueue(encoder.encode(
+                  `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`
+                ), "structured_block_stop")
+                safeEnqueue(encoder.encode(
+                  `event: message_delta\ndata: ${JSON.stringify({
+                    type: "message_delta",
+                    delta: { stop_reason: "end_turn", stop_sequence: null },
+                    usage: { output_tokens: lastUsage?.output_tokens ?? 0 },
+                  })}\n\n`
+                ), "structured_message_delta")
+                messageStartEmitted = true
+                eventsForwarded += 5
+                textEventsForwarded += 1
               }
 
               claudeLog("upstream.completed", {
