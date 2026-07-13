@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.47.0](https://github.com/rynfar/meridian/compare/meridian-v1.46.0...meridian-v1.47.0) (2026-07-13)
+
+
+### Features
+
+* **dashboard:** add Usage tab with session, weekly, and weekly-pace ([#604](https://github.com/rynfar/meridian/issues/604)) ([e0853af](https://github.com/rynfar/meridian/commit/e0853af63cc5a5cd82bc85ba93ef98e362808497))
+
+
+### Bug Fixes
+
+* **ci:** derive Docker semver from tag_name, not the empty version output ([#601](https://github.com/rynfar/meridian/issues/601)) ([144a7ce](https://github.com/rynfar/meridian/commit/144a7ce4623fb9ff838039d875b749aa72f0eb86))
+
 ## [1.46.0](https://github.com/rynfar/meridian/compare/meridian-v1.45.4...meridian-v1.46.0) (2026-07-13)
 
 
