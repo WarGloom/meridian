@@ -146,6 +146,15 @@ function fmtTok(n) {
   return n > 1000000 ? (n/1000000).toFixed(1) + 'M' : n > 1000 ? Math.round(n/1000) + 'k' : String(n);
 }
 
+// Model names come from client-supplied request bodies (requestModel) — escape
+// before concatenating into innerHTML so a quirky/malicious client can't
+// script the dashboard.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (ch) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+  });
+}
+
 function usd(v) {
   if (v == null) return '—';
   if (v > 0 && v < 0.01) return '$' + v.toFixed(4);
@@ -255,7 +264,7 @@ function render(s, reqs, logs, quota) {
     html += '<div class="cards">'
       + card('Est. API Cost', usd(ce.totalUsd), 'window total at API list prices');
     for (const [model, m] of costRows) {
-      html += card(model, usd(m.estimatedUsd), m.requests + ' req' + (m.requests === 1 ? '' : 's'));
+      html += card(esc(model), usd(m.estimatedUsd), m.requests + ' req' + (m.requests === 1 ? '' : 's'));
     }
     html += '</div>';
 
@@ -264,7 +273,7 @@ function render(s, reqs, logs, quota) {
       + '<th>Cache Read</th><th>Cache Write</th><th>Est. Cost</th></tr></thead><tbody>';
     for (const [model, m] of costRows) {
       html += '<tr>'
-        + '<td>' + model + (m.estimatedUsd == null ? ' <span style="font-size:10px;color:var(--yellow)">no pricing</span>' : '') + '</td>'
+        + '<td>' + esc(model) + (m.estimatedUsd == null ? ' <span style="font-size:10px;color:var(--yellow)">no pricing</span>' : '') + '</td>'
         + '<td class="mono">' + m.requests + '</td>'
         + '<td class="mono">' + fmtTok(m.inputTokens) + '</td>'
         + '<td class="mono">' + fmtTok(m.outputTokens) + '</td>'
@@ -289,7 +298,7 @@ function render(s, reqs, logs, quota) {
   if (models.length > 0) {
     html += '<div class="cards">';
     for (const [name, data] of models) {
-      html += card(name, data.count + ' reqs', 'avg ' + ms(data.avgTotalMs));
+      html += card(esc(name), data.count + ' reqs', 'avg ' + ms(data.avgTotalMs));
     }
     html += '</div>';
   }

@@ -3235,8 +3235,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   app.put("/settings/api/pricing/:model", async (c) => {
     const { validatePricingUpdate, setPricingOverride } = require("../telemetry/pricingStore") as typeof import("../telemetry/pricingStore")
     const model = c.req.param("model")
-    const body = await c.req.json()
     try {
+      // json() throws on malformed bodies — keep it inside the try so the
+      // client gets a 400, not a 500 (house pattern: /profiles/active).
+      const body = await c.req.json()
       setPricingOverride(model, validatePricingUpdate(body))
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400)

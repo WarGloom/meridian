@@ -92,6 +92,7 @@ export const landingHtml = `<!DOCTYPE html>
 </div>
 <script>
 function ms(v){if(v==null||v===0)return '\u2014';return v<1000?v+'ms':(v/1000).toFixed(1)+'s'}
+function esc(s){return String(s).replace(/[&<>"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]})}
 function usd(v){if(v==null)return '\u2014';if(v>0&&v<0.01)return '$'+v.toFixed(4);if(v<100)return '$'+v.toFixed(2);return '$'+Math.round(v).toLocaleString()}
 function card(l,v,d,c){return '<div class="card"><div class="card-label">'+l+'</div><div class="card-value '+(c||'')+'">'+v+'</div>'+(d?'<div class="card-detail">'+d+'</div>':'')+'</div>'}
 
@@ -112,7 +113,7 @@ function render(h,s){
   if(h.auth?.loggedIn){o+='<div class="info-grid"><span class="info-label">Email</span><span class="info-value">'+(h.auth.email||'\u2014')+'</span><span class="info-label">Subscription</span><span class="info-value">'+(h.auth.subscriptionType||'\u2014')+'</span><span class="info-label">Mode</span><span class="info-value">'+(h.mode||'internal')+'</span><span class="info-label">Endpoint</span><span class="info-value">http://'+location.host+'</span></div>'}
   else{o+='<div class="info-grid"><span class="info-label">Status</span><span class="info-value" style="color:var(--yellow)">'+(h.error||'Not authenticated')+'</span></div>'}
   o+='</div>';
-  if(s.byModel&&Object.keys(s.byModel).length>0){o+='<div class="section"><div class="section-title">Models (24h)</div><div class="grid">';for(const[n,d]of Object.entries(s.byModel))o+=card(n,d.count,'avg '+ms(d.avgTotalMs),'');o+='</div></div>'}
+  if(s.byModel&&Object.keys(s.byModel).length>0){o+='<div class="section"><div class="section-title">Models (24h)</div><div class="grid">';for(const[n,d]of Object.entries(s.byModel))o+=card(esc(n),d.count,'avg '+ms(d.avgTotalMs),'');o+='</div></div>'}
   o+='<div class="section"><div class="section-title">Connect an Agent</div><div class="snippet"><div class="snippet-tabs"><div class="snippet-tab active" onclick="showTab(this,&apos;opencode&apos;)">OpenCode</div><div class="snippet-tab" onclick="showTab(this,&apos;crush&apos;)">Crush</div><div class="snippet-tab" onclick="showTab(this,&apos;generic&apos;)">Any Tool</div></div><div id="tab-opencode"><code>ANTHROPIC_API_KEY=x ANTHROPIC_BASE_URL=http://'+location.host+' opencode</code></div><div id="tab-crush" style="display:none"><code>'+JSON.stringify({providers:{meridian:{type:"anthropic",base_url:"http://"+location.host,api_key:"x",models:[{id:"claude-sonnet-4-5-20250514",name:"Sonnet 4.5"}]}}},null,2)+'</code></div><div id="tab-generic" style="display:none"><code>export ANTHROPIC_API_KEY=x\\nexport ANTHROPIC_BASE_URL=http://'+location.host+'</code></div></div></div>';
   o+='<div class="links"><a href="/telemetry" class="link">\ud83d\udcca Telemetry</a><a href="/settings" class="link">\ud83d\udd27 Settings</a><a href="/profiles" class="link">\ud83d\udc64 Profiles</a><a href="/health" class="link">\ud83e\ude7a Health</a><a href="/telemetry/summary" class="link">\ud83d\udcc8 Stats API</a><a href="https://github.com/rynfar/meridian" class="link">\u2699\ufe0f GitHub</a></div>';
   o+='<div class="footer">Meridian \u00b7 Built on the <a href="https://github.com/anthropics/claude-code-sdk-js">Claude Code SDK</a></div>';
