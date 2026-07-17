@@ -121,6 +121,10 @@ Then in `~/.config/opencode/opencode.json`:
       # passthrough = true;
       # defaultAgent = "opencode";
       # sonnetModel = "sonnet";
+      # Load plugins from the Nix store (rendered to a plugins.json manifest).
+      # Point at an entry inside a packaged derivation so its deps come along.
+      # pluginConfig = [ { path = "${pkgs.my-meridian-plugin}/lib/index.js"; } ];
+      # pluginDir = "/path/to/extra/plugins";
     };
     # Extra env vars not covered by settings
     # environment = {
@@ -788,6 +792,8 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `MERIDIAN_SESSION_DIR` | `CLAUDE_PROXY_SESSION_DIR` | `~/.cache/meridian` | Directory for the persisted session store |
 | `MERIDIAN_DEBUG` | `CLAUDE_PROXY_DEBUG` | unset | Set to `1` for verbose request/session logging |
 | `MERIDIAN_SILENT` | `CLAUDE_PROXY_SILENT` | unset | Set to `1` to suppress startup output (used by embedding plugins) |
+| `MERIDIAN_PLUGIN_DIR` | — | `~/.config/meridian/plugins` | Plugin auto-discovery directory |
+| `MERIDIAN_PLUGIN_CONFIG` | — | `~/.config/meridian/plugins.json` | Plugin manifest path |
 
 †Sonnet 1M requires Extra Usage on all plans including Max ([docs](https://code.claude.com/docs/en/model-config#extended-context)). Opus 1M is included with Max/Team/Enterprise at no extra cost.
 
@@ -879,6 +885,8 @@ npm install @rynfar/meridian-plugin-hermes-scrub
 ```
 
 Paths must be absolute — the loader does not expand `~`.
+
+Both plugin locations are configurable for the standalone CLI: `MERIDIAN_PLUGIN_DIR` overrides the auto-discovery directory and `MERIDIAN_PLUGIN_CONFIG` the manifest path (useful for Nix, containers, or running several instances with different plugin sets).
 
 ## CLI Commands
 
