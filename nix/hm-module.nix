@@ -6,9 +6,9 @@ packages:
   ...
 }:
 let
-  inherit (lib.attrsets) filterAttrsRecursive mapAttrsToList mapAttrsToListRecursive;
+  inherit (lib.attrsets) mapAttrsToList;
   inherit (lib.generators) mkKeyValueDefault;
-  inherit (lib.lists) concatMap elem;
+  inherit (lib.lists) concatLists elem optional;
   inherit (lib.meta) getExe;
   inherit (lib.modules) mkIf;
   inherit (lib.options)
@@ -18,12 +18,12 @@ let
     mkPackageOption
     ;
   inherit (lib.strings)
-    join
-    upperChars
-    splitStringBy
+    concatStrings
+    concatStringsSep
+    stringToCharacters
     toUpper
+    upperChars
     ;
-  inherit (lib.trivial) flip pipe;
   inherit (lib.types)
     attrsOf
     bool
@@ -96,13 +96,23 @@ in
             path = mkOption {
               type = path;
               example = literalExpression ''"''${plugin}/lib/index.js"'';
-              description = "Path to the plugin's ESM entry file.";
+              description = ''
+                Path to the plugin's ESM entry file. Reference an entry
+                *inside a packaged derivation* (e.g. `"''${plugin}/lib/index.js"`)
+                so the plugin's dependencies land in the store next to it — a
+                bare `./file.js` path literal copies only that one file, which
+                breaks plugins that import sibling `node_modules`.
+              '';
             };
           };
         });
         default = [ ];
-        apply = mkPluginFile;
-        description = "Plugins to load, in list order, rendered to a `plugins.json` manifest passed as `MERIDIAN_PLUGIN_CONFIG`.";
+        # Render to a manifest only when plugins are actually configured.
+        # Rendering the empty default too would export MERIDIAN_PLUGIN_CONFIG
+        # unconditionally, silently overriding the user's own
+        # ~/.config/meridian/plugins.json.
+        apply = plugins: if plugins == [ ] then null else mkPluginFile plugins;
+        description = "Plugins to load, in list order, rendered to a `plugins.json` manifest passed as `MERIDIAN_PLUGIN_CONFIG`. Leave empty to keep using `~/.config/meridian/plugins.json`.";
       };
 
       pluginDir = mkOption {
@@ -155,18 +165,25 @@ in
 
         Environment =
           let
-            env = flip pipe [
-              (concatMap (splitStringBy (_: curr: elem curr upperChars) true))
-              (map toUpper)
-              (join "_")
-              (s: "MERIDIAN_${s}")
-            ];
+            # camelCase settings name -> SNAKE_CASE fragment ("retentionDays" -> "RETENTION_DAYS")
+            toSnake = s: concatStrings (map (c: if elem c upperChars then "_${c}" else c) (stringToCharacters s));
+            envName = attrPath: "MERIDIAN_" + toUpper (concatStringsSep "_" (map toSnake attrPath));
+            # Flatten cfg.settings into env assignments, skipping nulls.
+            # Restricted to lib functions that have existed for years so the
+            # module imposes no minimum nixpkgs version on consumers.
+            flatten =
+              prefix: attrs:
+              concatLists (
+                mapAttrsToList (
+                  name: value:
+                  if builtins.isAttrs value then
+                    flatten (prefix ++ [ name ]) value
+                  else
+                    optional (value != null) (mkKeyValueDefault { } "=" (envName (prefix ++ [ name ])) value)
+                ) attrs
+              );
           in
-          pipe cfg.settings [
-            (filterAttrsRecursive (_: v: v != null))
-            (mapAttrsToListRecursive (path: value: mkKeyValueDefault { } "=" (env path) value))
-          ]
-          ++ mapAttrsToList (mkKeyValueDefault { } "=") cfg.environment;
+          flatten [ ] cfg.settings ++ mapAttrsToList (mkKeyValueDefault { } "=") cfg.environment;
       };
 
       Install.WantedBy = [ "default.target" ];
