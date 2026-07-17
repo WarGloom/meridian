@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.51.0](https://github.com/rynfar/meridian/compare/meridian-v1.50.0...meridian-v1.51.0) (2026-07-17)
+
+
+### Features
+
+* **telemetry:** cost estimation cards with configurable model pricing ([afd3eda](https://github.com/rynfar/meridian/commit/afd3eda8a00c575c96e8cca1e7c47302edcacab7))
+* **telemetry:** per-profile usage indicators on the landing page ([#637](https://github.com/rynfar/meridian/issues/637)) ([4642813](https://github.com/rynfar/meridian/commit/4642813a2920e8d7dc193cb62382ee7c755abb55))
+* **telemetry:** redesign the landing page around per-account value ([#639](https://github.com/rynfar/meridian/issues/639)) ([7c39072](https://github.com/rynfar/meridian/commit/7c3907274edf630a67d066e20f50a2e04b612a19))
+* **telemetry:** usage-value batch — cost estimation ([#629](https://github.com/rynfar/meridian/issues/629)) + model-scoped quotas ([#624](https://github.com/rynfar/meridian/issues/624)) ([c04898b](https://github.com/rynfar/meridian/commit/c04898b279cbf23316fd8f40f19356a4705b0789))
+* **ui:** design system, site header, switchable account cards + full README audit ([#640](https://github.com/rynfar/meridian/issues/640)) ([70f526a](https://github.com/rynfar/meridian/commit/70f526a3fe753b9a9fb6c95bb136550da3db060e))
+
+
+### Bug Fixes
+
+* expose model-scoped usage limits ([546d86c](https://github.com/rynfar/meridian/commit/546d86cb09c4f90a946cf2decdd7a8e416578c0a))
+* **telemetry:** harden the cost-estimation batch ([6571bf1](https://github.com/rynfar/meridian/commit/6571bf1b1f43c6bcc4ba42015adf5abdfaf5a506))
+
 ## [1.50.0](https://github.com/rynfar/meridian/compare/meridian-v1.49.1...meridian-v1.50.0) (2026-07-16)
 
 
