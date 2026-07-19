@@ -25,5 +25,8 @@ jobs:
             echo "::error::the @anthropic-ai/claude-code floor outpaces the pinned nixpkgs; a bump satisfies it, so run 'nix flake update nixpkgs' and include the flake.lock change in this PR"
             exit 1
           fi
-          echo "::error::no released nixpkgs claude-code satisfies the @anthropic-ai/claude-code floor yet; hold this bump until nixpkgs packages it"
+          # Surface the actual eval error so an unrelated eval breakage is not
+          # misread as a missing claude-code version.
+          nix eval .#packages.x86_64-linux.meridian.drvPath 2>&1 | tail -20 || true
+          echo "::error::evaluation still fails on the latest nixpkgs (see log above); if the error is 'marked as broken', no released nixpkgs claude-code satisfies the @anthropic-ai/claude-code floor yet - hold this bump until nixpkgs packages it"
           exit 1

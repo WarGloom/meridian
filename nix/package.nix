@@ -51,7 +51,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     makeWrapper ${getExe nodejs_22} $out/bin/${finalAttrs.meta.mainProgram} \
       --add-flags "$out/lib/meridian/dist/cli.js" \
-      --set MERIDIAN_CLAUDE_PATH ${getExe claude-code}
+      --set-default MERIDIAN_CLAUDE_PATH ${getExe claude-code}
 
     runHook postInstall
   '';
