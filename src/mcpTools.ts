@@ -2,12 +2,12 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { exec, execFile } from "node:child_process"
+import { exec } from "node:child_process"
 import { promisify } from "node:util"
 import { glob as globLib } from "glob"
+import { runGrepTool } from "./grepTool"
 
 const execAsync = promisify(exec)
-const execFileAsync = promisify(execFile)
 
 const getCwd = () => process.env.MERIDIAN_WORKDIR ?? process.env.CLAUDE_PROXY_WORKDIR ?? process.cwd()
 
@@ -177,27 +177,7 @@ export function createOpencodeMcpServer() {
         path: z.string().optional().describe("Directory or file to search in"),
         include: z.string().optional().describe("File pattern to include, e.g., *.ts")
       },
-      async (args) => {
-        try {
-          const searchPath = args.path || getCwd()
-          const includePattern = args.include || "*"
-          const grepArgs = ["-rn", `--include=${includePattern}`, args.pattern, searchPath]
-          const { stdout } = await execFileAsync("grep", grepArgs, { maxBuffer: 10 * 1024 * 1024 })
-          return {
-            content: [{ type: "text", text: stdout || "(no matches)" }]
-          }
-        } catch (error: unknown) {
-          // grep exits with code 1 when no matches are found — not a real error
-          const grepError = error as { code?: number; stdout?: string }
-          if (grepError.code === 1) {
-            return { content: [{ type: "text", text: grepError.stdout || "(no matches)" }] }
-          }
-          return {
-            content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-            isError: true
-          }
-        }
-      }
+      runGrepTool
     )
   ]
   })

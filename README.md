@@ -667,6 +667,27 @@ Run several configurations of the same adapter side by side — e.g. a passthrou
 
 Built-in adapter names are reserved and can't be shadowed. With no instances configured, detection is exactly the built-in chain. Config file changes apply within ~5s, no restart needed.
 
+### Claude Design MCP
+
+Meridian proxies the Claude Design MCP API (`api.anthropic.com/v1/design/*`), so MCP clients can use Claude Design tools through your local endpoint. Point your MCP client at:
+
+```
+http://127.0.0.1:3456/v1/design/mcp
+```
+
+The Design API requires OAuth scopes (`user:design:read`/`user:design:write`) that Meridian's standard login does not carry, so authorize once with the dedicated flow:
+
+```bash
+curl http://127.0.0.1:3456/design-login          # returns an authorize URL — open it in your browser
+curl -X POST http://127.0.0.1:3456/design-login \
+  -H 'content-type: application/json' \
+  -d '{"code": "<code-from-browser>"}'           # paste the code you were shown
+```
+
+The design token is stored at `~/.config/meridian/design-token.json` (mode `0600`, global across profiles) and refreshed automatically when it expires. If a design request returns `auth_error`, re-run the login flow.
+
+> Contributed by [@sittitep](https://github.com/sittitep) (#543).
+
 ### Any Anthropic-compatible tool
 
 ```bash
@@ -834,6 +855,8 @@ ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 o
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions |
 | `POST /v1/responses` | OpenAI Responses API (Codex CLI ≥ 0.96) |
 | `GET /v1/models` | OpenAI-compatible model list |
+| `GET/POST /v1/design/*` | Claude Design MCP proxy (see [Claude Design MCP](#claude-design-mcp)) |
+| `GET/POST /design-login` | OAuth flow for the design scopes |
 | `GET /health` | Auth status, mode, plugin status |
 | `POST /auth/refresh` | Manually refresh the OAuth token |
 | `GET /telemetry` | Performance dashboard |

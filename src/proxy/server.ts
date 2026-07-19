@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
+import { stream } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import type { Server } from "node:http"
 import { homedir } from "node:os"
@@ -50,6 +51,16 @@ import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, rend
 import type { RequestMetric } from "../telemetry"
 import { classifyError, extractSdkTermination, formatSdkTermination, isStaleSessionError, isBusySessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken, ensureFreshToken, startBackgroundRefresh, stopBackgroundRefresh, createPlatformCredentialStore, type CredentialStore } from "./tokenRefresh"
+import {
+  createFileDesignTokenStore,
+  createDesignLogin,
+  getDesignAccessToken,
+  resolveDesignAuthHeaders,
+  buildDesignForwardHeaders,
+  filterUpstreamResponseHeaders,
+  isDesignAuthFailure,
+  DESIGN_UPSTREAM_ORIGIN,
+} from "./design"
 import { checkPluginConfigured } from "./setup"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDefaults, explicitModelPin, CANONICAL_SONNET_MODEL, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, getResolvedClaudeExecutableInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
 import type { AnthropicSseEvent } from "./openai"
@@ -446,6 +457,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   app.use("/plugins", requireAuth)
   app.use("/settings/*", requireAuth)
   app.use("/settings", requireAuth)
+  app.use("/design-login", requireAuth)
   app.use("/auth/*", requireAuth)
 
   app.get("/", (c) => {
@@ -456,7 +468,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         status: "ok",
         service: "meridian",
         format: "anthropic",
-        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/responses", "/v1/models", "/telemetry", "/metrics", "/health"]
+        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/responses", "/v1/models", "/v1/design/*", "/design-login", "/telemetry", "/metrics", "/health"]
       })
     }
     return c.html(landingHtml)
@@ -4018,6 +4030,91 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         recoverPreviousCommand: `claude --resume ${recovery.previousClaudeSessionId}`,
         note: "Previous session was replaced — if your current session has lost context, try the previous session ID.",
       } : {}),
+    })
+  })
+
+  // --- Claude Design MCP Proxy (#543) ---
+  // All logic lives in ./design; these routes only wire HTTP.
+  const designTokenStore = createFileDesignTokenStore()
+  const designLogin = createDesignLogin({ store: designTokenStore })
+
+  app.get("/design-login", (c) => c.json(designLogin.start()))
+
+  app.post("/design-login", async (c) => {
+    let body: unknown
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ type: "error", error: { type: "invalid_request", message: "Request body must be JSON with a 'code' field." } }, 400)
+    }
+    const result = await designLogin.exchange(body)
+    if (result.status === 200) plog(`[PROXY] Design token stored via /design-login`)
+    return new Response(JSON.stringify(result.body), {
+      status: result.status,
+      headers: { "content-type": "application/json" },
+    })
+  })
+
+  // GET requests to the design MCP are SSE streams for server-initiated
+  // events. Anthropic's Design API pushes nothing over them, so proxying the
+  // GET upstream leaves the MCP client hanging with zero bytes. Serve a
+  // lightweight local keep-alive stream instead.
+  app.get("/v1/design/*", (c) => {
+    c.status(200)
+    c.header("content-type", "text/event-stream")
+    c.header("cache-control", "no-cache")
+    return stream(c, async (s) => {
+      while (!s.aborted) {
+        await s.write(": keepalive\n\n")
+        await s.sleep(15_000)
+      }
+    })
+  })
+
+  // POST requests proxy the MCP JSON-RPC to Anthropic's Design API with
+  // auth resolved by the design module (design token first, then profile
+  // credentials).
+  app.post("/v1/design/*", async (c) => {
+    const profile = resolveProfile(
+      finalConfig.profiles,
+      finalConfig.defaultProfile,
+      c.req.header("x-meridian-profile") || undefined
+    )
+    const url = new URL(c.req.url)
+    const upstreamUrl = `${DESIGN_UPSTREAM_ORIGIN}${url.pathname}${url.search}`
+
+    const designToken = await getDesignAccessToken({ store: designTokenStore })
+    const authHeaders = await resolveDesignAuthHeaders({
+      designToken,
+      profile,
+      credentialStore: credentialStoreForProfile(profile),
+      ensureFresh: ensureFreshToken,
+    })
+
+    const body = await c.req.arrayBuffer()
+    const forwardHeaders = buildDesignForwardHeaders((name) => c.req.header(name), authHeaders)
+
+    let upstreamRes: Response
+    try {
+      upstreamRes = await fetch(upstreamUrl, { method: "POST", headers: forwardHeaders, body })
+    } catch (err) {
+      return c.json(
+        { type: "error", error: { type: "upstream_error", message: err instanceof Error ? err.message : String(err) } },
+        502
+      )
+    }
+
+    if (isDesignAuthFailure(upstreamRes.status)) {
+      return c.json(
+        { type: "error", error: { type: "auth_error", message: "Unauthorized. Run /design-login to authorize Claude Design (adds user:design:read/write scopes)." } },
+        401
+      )
+    }
+
+    plog(`[PROXY] DESIGN upstream=${upstreamRes.status}`)
+    return new Response(upstreamRes.body, {
+      status: upstreamRes.status,
+      headers: filterUpstreamResponseHeaders(upstreamRes.headers.entries()),
     })
   })
 
