@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.56.0](https://github.com/rynfar/meridian/compare/meridian-v1.55.1...meridian-v1.56.0) (2026-07-23)
+
+
+### Features
+
+* attribute active-profile switches in logs ([#679](https://github.com/rynfar/meridian/issues/679)) ([77c01e4](https://github.com/rynfar/meridian/commit/77c01e4bea047a53f1301dbd4f0b1d4cbe5d5626))
+* priority profile routing — ordered account pool with per-request failover (opt-in) ([#680](https://github.com/rynfar/meridian/issues/680)) ([5fb735b](https://github.com/rynfar/meridian/commit/5fb735b05f3963a46edae7183d11142ade44842e))
+* **ui:** per-account weekly pace on home; remove the telemetry Usage tab ([#678](https://github.com/rynfar/meridian/issues/678)) ([526ecbd](https://github.com/rynfar/meridian/commit/526ecbdd4fc0562e8f7a7fb3bb6df3c60361590b))
+
+
+### Bug Fixes
+
+* serve bounded-stale OAuth usage on transient fetch failures ([#677](https://github.com/rynfar/meridian/issues/677)) ([ca1cc56](https://github.com/rynfar/meridian/commit/ca1cc56363098b37ab6c9cf1e1937de1042f78df))
+* **ui:** error color belongs to the errors detail, not the request total ([#674](https://github.com/rynfar/meridian/issues/674)) ([1642955](https://github.com/rynfar/meridian/commit/16429551bdb68ae00ee922ebe8baf0adc2c9cefa))
+
 ## [1.55.1](https://github.com/rynfar/meridian/compare/meridian-v1.55.0...meridian-v1.55.1) (2026-07-23)
 
 
