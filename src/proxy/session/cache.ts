@@ -356,7 +356,12 @@ export function lookupSession(
     const shared = lookupSharedSessionResult(sessionId)
     const cached = sessionCache.get(sessionId)
     const state = shared.status === "found"
-      ? stateFromSharedSession(shared.session)
+      ? {
+          ...stateFromSharedSession(shared.session),
+          ...(shared.session.clientContextHash !== undefined
+            ? { clientContextHash: shared.session.clientContextHash }
+            : {}),
+        }
       : shared.status === "error" ? cached : undefined
     if (shared.status === "missing") {
       sessionCache.delete(sessionId)
@@ -392,7 +397,12 @@ export function lookupSession(
     const shared = lookupSharedSessionResult(fp)
     const cached = fingerprintCache.get(fp)
     const state = shared.status === "found"
-      ? stateFromSharedSession(shared.session)
+      ? {
+          ...stateFromSharedSession(shared.session),
+          ...(shared.session.clientContextHash !== undefined
+            ? { clientContextHash: shared.session.clientContextHash }
+            : {}),
+        }
       : shared.status === "error" ? cached : undefined
     if (shared.status === "missing") {
       fingerprintCache.delete(fp)
@@ -424,7 +434,12 @@ export function getSessionByClaudeId(claudeSessionId: string): SessionState | un
     removeFingerprintEntriesByClaudeSessionId(claudeSessionId)
     return undefined
   }
-  return stateFromSharedSession(shared.session)
+  return {
+    ...stateFromSharedSession(shared.session),
+    ...(shared.session.clientContextHash !== undefined
+      ? { clientContextHash: shared.session.clientContextHash }
+      : {}),
+  }
 }
 
 /** Store a session mapping with lineage hash and SDK UUIDs for divergence detection.
@@ -444,6 +459,7 @@ export function storeSession(
   sourceTranscript?: { sessionId: string; configDir: string; projectDir?: string },
   expectedGeneration?: StoredSessionGeneration | null,
   priorityPublication?: PrioritySessionPublication,
+  clientContextHash?: string,
 ): StoredSessionGeneration | false {
   if (!claudeSessionId) return false
   const lineageHash = computeLineageHash(messages)
@@ -460,8 +476,9 @@ export function storeSession(
     ...(passthroughToolCallAssistantUuid ? { passthroughToolCallAssistantUuid } : {}),
     ...(passthroughToolCallIds ? { passthroughToolCallIds } : {}),
     ...(contextUsage ? { contextUsage } : {}),
-    ...(currentTranscript ? { currentTranscript } : {}),
+...(currentTranscript ? { currentTranscript } : {}),
     ...(sourceTranscript ? { previousTranscript: sourceTranscript } : {}),
+    ...(clientContextHash ? { clientContextHash } : {}),
   }
   const fp = getConversationFingerprint(messages, workingDirectory)
   const key = sessionId || fp
@@ -488,6 +505,7 @@ export function storeSession(
       passthroughToolCallIds: passthroughToolCallIds ?? null,
       currentTranscript,
       sourceTranscript,
+      clientContextHash,
       expectedMappingGeneration: expectedGeneration,
       rollbackMappingKey: rollback?.previousAssignment?.mappingKey,
       attemptOwnerToken: priorityPublication.attemptOwnerToken,
@@ -525,6 +543,7 @@ export function storeSession(
       currentTranscript,
       sourceTranscript,
       expectedGeneration,
+      clientContextHash,
     )
   }
   if (!storedGeneration) return false

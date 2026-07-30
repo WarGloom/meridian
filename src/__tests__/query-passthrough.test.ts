@@ -1,7 +1,7 @@
 /**
  * Tests for SDK parameter passthrough fields in buildQueryOptions.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test"
+import { describe, it, expect } from "bun:test"
 import { buildQueryOptions, type QueryContext } from "../proxy/query"
 import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS } from "../proxy/tools"
 
@@ -96,23 +96,13 @@ describe("buildQueryOptions — SDK parameter passthrough", () => {
   })
 })
 
-describe("scratchpad suppression via CLAUDE_CODE_SESSION_KIND (#627)", () => {
-  // The CLI advertises its scratchpad directory (a PROXY-HOST path) in the
-  // model's context; in passthrough the CLIENT executes tools, and OpenCode
-  // 1.18's permission model rejects that alien path (external_directory).
-  // The CLI skips the scratchpad block when CLAUDE_CODE_SESSION_KIND=bg —
-  // its own headless-background mode, which is semantically what Meridian's
-  // subprocess is.
-  let saved: string | undefined
-  beforeEach(() => { saved = process.env.MERIDIAN_SUPPRESS_SCRATCHPAD; delete process.env.MERIDIAN_SUPPRESS_SCRATCHPAD })
-  afterEach(() => {
-    if (saved === undefined) delete process.env.MERIDIAN_SUPPRESS_SCRATCHPAD
-    else process.env.MERIDIAN_SUPPRESS_SCRATCHPAD = saved
-  })
+describe("passthrough session kind", () => {
+  it("does not turn resumable passthrough sessions into background jobs", () => {
+    const fresh = buildQueryOptions(makeContext({ passthrough: true }))
+    const resumed = buildQueryOptions(makeContext({ passthrough: true, resumeSessionId: "sdk-session" }))
 
-  it("sets CLAUDE_CODE_SESSION_KIND=bg in passthrough mode", () => {
-    const result = buildQueryOptions(makeContext({ passthrough: true }))
-    expect((result.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBe("bg")
+    expect((fresh.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBeUndefined()
+    expect((resumed.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBeUndefined()
   })
 
   it("does NOT set it in internal mode (SDK executes tools; scratchpad is valid there)", () => {
@@ -126,11 +116,5 @@ describe("scratchpad suppression via CLAUDE_CODE_SESSION_KIND (#627)", () => {
       envOverrides: { CLAUDE_CODE_SESSION_KIND: "daemon" },
     }))
     expect((result.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBe("daemon")
-  })
-
-  it("kill switch MERIDIAN_SUPPRESS_SCRATCHPAD=0 disables it", () => {
-    process.env.MERIDIAN_SUPPRESS_SCRATCHPAD = "0"
-    const result = buildQueryOptions(makeContext({ passthrough: true }))
-    expect((result.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBeUndefined()
   })
 })
