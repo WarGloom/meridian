@@ -93,16 +93,19 @@ describe("Shared session store", () => {
       undefined,
       undefined,
       { input_tokens: 9, output_tokens: 4 },
-      [["block-hash-a", "block-hash-b"]]
+      [["block-hash-a", "block-hash-b"]],
+      "client-context-hash",
     )
 
     const byKey = lookupSharedSession("session-usage")
     expect(byKey?.contextUsage).toEqual({ input_tokens: 9, output_tokens: 4 })
     expect(byKey?.messageBlockHashes).toEqual([["block-hash-a", "block-hash-b"]])
+    expect(byKey?.clientContextHash).toBe("client-context-hash")
 
     const byClaudeId = lookupSharedSessionByClaudeId("claude-sess-usage")
     expect(byClaudeId?.contextUsage).toEqual({ input_tokens: 9, output_tokens: 4 })
     expect(byClaudeId?.messageBlockHashes).toEqual([["block-hash-a", "block-hash-b"]])
+    expect(byClaudeId?.clientContextHash).toBe("client-context-hash")
   })
 
   it("should persist and clear the passthrough assistant resume checkpoint", () => {

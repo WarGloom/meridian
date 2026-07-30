@@ -63,6 +63,8 @@ export interface SessionState {
   passthroughToolCallIds?: string[]
   /** Last observed token usage for this session (from SDK message_start / message_delta events) */
   contextUsage?: TokenUsage
+  /** Hash of the client system context already persisted in this SDK session. */
+  clientContextHash?: string
 }
 
 /**

@@ -45,6 +45,8 @@ export interface StoredSession {
   passthroughToolCallIds?: string[]
   /** Last observed token usage for this Claude session */
   contextUsage?: TokenUsage
+  /** Hash of the client system context already persisted in this SDK session. */
+  clientContextHash?: string
   /** Previous Claude session ID preserved when the session mapping is replaced.
    *  Enables recovery when a lineage bug (e.g. false compaction) causes the
    *  original session to be abandoned and a new one started. */
@@ -221,7 +223,8 @@ export function storeSharedSession(
   contextUsage?: TokenUsage,
   messageBlockHashes?: string[][],
   passthroughToolCallAssistantUuid?: string | null,
-  passthroughToolCallIds?: string[] | null
+  passthroughToolCallIds?: string[] | null,
+  clientContextHash?: string
 ): void {
   const path = getStorePath()
   const lockPath = `${path}.lock`
@@ -255,6 +258,7 @@ export function storeSharedSession(
         ? existing?.passthroughToolCallIds
         : passthroughToolCallIds ?? undefined,
       contextUsage: contextUsage ?? existing?.contextUsage,
+      clientContextHash: clientContextHash ?? existing?.clientContextHash,
       ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),
     }
 

@@ -190,6 +190,7 @@ export function lookupSession(
         passthroughToolCallAssistantUuid: shared.passthroughToolCallAssistantUuid,
         passthroughToolCallIds: shared.passthroughToolCallIds,
         contextUsage: shared.contextUsage,
+        clientContextHash: shared.clientContextHash,
       }
       const result = classifyLineage(state, messages, sessionId)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -221,6 +222,7 @@ export function lookupSession(
         passthroughToolCallAssistantUuid: shared.passthroughToolCallAssistantUuid,
         passthroughToolCallIds: shared.passthroughToolCallIds,
         contextUsage: shared.contextUsage,
+        clientContextHash: shared.clientContextHash,
       }
       const result = classifyLineage(state, messages, fp)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -261,6 +263,7 @@ export function getSessionByClaudeId(claudeSessionId: string): SessionState | un
       passthroughToolCallAssistantUuid: shared.passthroughToolCallAssistantUuid,
       passthroughToolCallIds: shared.passthroughToolCallIds,
       contextUsage: shared.contextUsage,
+      clientContextHash: shared.clientContextHash,
     })
   }
 
@@ -279,7 +282,8 @@ export function storeSession(
   sdkMessageUuids?: Array<string | null>,
   contextUsage?: TokenUsage,
   passthroughToolCallAssistantUuid?: string | null,
-  passthroughToolCallIds?: string[] | null
+  passthroughToolCallIds?: string[] | null,
+  clientContextHash?: string
 ) {
   if (!claudeSessionId) return
   const lineageHash = computeLineageHash(messages)
@@ -296,6 +300,7 @@ export function storeSession(
     ...(passthroughToolCallAssistantUuid ? { passthroughToolCallAssistantUuid } : {}),
     ...(passthroughToolCallIds ? { passthroughToolCallIds } : {}),
     ...(contextUsage ? { contextUsage } : {}),
+    ...(clientContextHash ? { clientContextHash } : {}),
   }
   // In-memory cache
   if (sessionId) sessionCache.set(sessionId, state)
@@ -320,7 +325,8 @@ export function storeSession(
       messageBlockHashes,
       // undefined would preserve the stored checkpoint; a full store must rewrite it.
       passthroughToolCallAssistantUuid ?? null,
-      passthroughToolCallIds ?? null
+      passthroughToolCallIds ?? null,
+      clientContextHash
     )
   }
 }
