@@ -12785,7 +12785,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
         })
       })()
       return closePromise
-    }
     },
   }
   server.once("error", () => {
