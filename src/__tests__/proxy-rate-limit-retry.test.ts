@@ -93,7 +93,7 @@ mock.module("../mcpTools", () => ({
 const { createProxyServer, clearSessionCache } = await import("../proxy/server")
 
 function createTestApp() {
-  const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+  const { app } = createProxyServer({ port: 0, host: "127.0.0.1", rateLimitBaseDelayMs: 0 })
   return app
 }
 

@@ -875,7 +875,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         } = process.env
 
         // Pin ANTHROPIC_DEFAULT_{TYPE}_MODEL before the inherited env. The
-        // Claude Agent SDK resolves the "sonnet"/"opus"/"haiku" aliases
+        // Claude Agent SDK resolves the "fable"/"sonnet"/"opus"/"haiku" aliases
         // (emitted by mapModelToClaudeModel) via these env vars; when unset
         // it falls back to its own bundled defaults, which lag real
         // availability and caused #419 (opus-* requests silently answering
@@ -883,8 +883,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // so user-provided ANTHROPIC_DEFAULT_* values still win.
         const sdkModelDefaults = resolveSdkModelDefaults()
 
-        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account)
-        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...profile.env }
+        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account).
+        // Drop undefined profile entries so they don't erase the SDK model pins.
+        const definedProfileEnv = Object.fromEntries(
+          Object.entries(profile.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+        )
+        const profileEnv = { ...sdkModelDefaults, ...cleanEnv, ...definedProfileEnv }
         const profileCredentialStore = credentialStoreForProfile(profile)
 
         let systemContext = ""
@@ -1666,7 +1670,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             //   1. Strip [1m] context (immediate, different model tier)
             //   2. Backoff retries on base model (1s, 2s — exponential)
             const MAX_RATE_LIMIT_RETRIES = 2
-            const RATE_LIMIT_BASE_DELAY_MS = 1000
+            const RATE_LIMIT_BASE_DELAY_MS = finalConfig.rateLimitBaseDelayMs
 
             const response = (async function* () {
               let rateLimitRetries = 0
@@ -1939,13 +1943,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                 // Preserve content blocks, with two passthrough-specific guards:
                 //
-                // 1. Stop-after-tool-use: in passthrough mode the SDK runs 2 turns
-                //    (maxTurns:2 is required to avoid SDK crash). Turn 1 is the real
-                //    response containing the client's tool_use blocks. Turn 2 is an
-                //    SDK artefact — Claude receives a blank tool result and generates
-                //    a prose summary ("The edit has been forwarded..."). That Turn 2
-                //    content must NOT be forwarded; it confuses the client into
-                //    showing prose instead of executing + diff-rendering the tool_use.
+                // 1. Stop-after-tool-use: passthrough gives the SDK a high enough
+                //    maxTurns ceiling to survive variable internal setup before the
+                //    real response containing the client's tool_use blocks. Any later
+                //    SDK turn is an artefact: Claude receives a blank tool result and
+                //    generates a prose summary ("The edit has been forwarded...").
+                //    That later content must NOT be forwarded; it confuses the client
+                //    into showing prose instead of executing and diff-rendering the
+                //    tool_use.
                 //
                 // 2. Strip thinking blocks: type:"thinking" / type:"redacted_thinking"
                 //    contain an encrypted signature that is only valid inside Claude's
@@ -2389,7 +2394,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               //   1. Strip [1m] context (immediate, different model tier)
               //   2. Backoff retries on base model (1s, 2s — exponential)
               const MAX_RATE_LIMIT_RETRIES = 2
-              const RATE_LIMIT_BASE_DELAY_MS = 1000
+              const RATE_LIMIT_BASE_DELAY_MS = finalConfig.rateLimitBaseDelayMs
 
               const response = (async function* () {
                 let rateLimitRetries = 0
@@ -3252,7 +3257,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const streamErr = error instanceof UpstreamIdleError
                 ? {
                     status: 504,
-                    type: "upstream_timeout",
+                    // Anthropic clients validate/format this field; keep it within
+                    // the public Anthropic error union instead of leaking a custom
+                    // control type into visible transcripts.
+                    type: "timeout_error",
                     message: `Upstream stalled: no data for ${error.sinceLastMs}ms`,
                   }
                 : classifyError(errMsg, model)
@@ -3442,10 +3450,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 ), "error_message_stop")
               }
 
-              safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-                type: "error",
-                error: { type: streamErr.type, message: streamErr.message }
-              })}\n\n`), "error_event")
+              if (!(error instanceof UpstreamIdleError && messageStartEmitted)) {
+                safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+                  type: "error",
+                  error: { type: streamErr.type, message: streamErr.message }
+                })}\n\n`), "error_event")
+              }
               if (!streamClosed) {
                 try { controller.close() } catch {}
                 streamClosed = true
@@ -4606,7 +4616,13 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
       if (authKeepaliveInterval) clearInterval(authKeepaliveInterval)
       stopBackgroundRefresh()
       await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()))
+        server.close((err) => {
+          if (!err || (err as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") {
+            resolve()
+            return
+          }
+          reject(err)
+        })
       })
     },
   }
