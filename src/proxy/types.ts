@@ -42,6 +42,8 @@ export interface ProxyConfig {
   defaultProfile?: string
   /** Package version, exposed via /health endpoint */
   version?: string
+  /** Base delay for rate-limit backoff retries. Tests can set this to 0. */
+  rateLimitBaseDelayMs: number
   /** Plugin auto-discovery directory. Defaults to ~/.config/meridian/plugins/. */
   pluginDir?: string
   /** Plugin config file path. Defaults to ~/.config/meridian/plugins.json. */
@@ -131,6 +133,7 @@ export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   profiles: undefined,
   defaultProfile: undefined,
   version: undefined,
+  rateLimitBaseDelayMs: 1000,
 }
 
 function parseAgPluginPaths(value: string): string[] {
