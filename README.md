@@ -79,7 +79,7 @@ The Claude Agent SDK provides programmatic access to Claude. But your favorite c
 - **Session management** — conversations persist across requests, survive compaction and undo, resume after proxy restarts
 - **Streaming** — full SSE streaming with MCP tool filtering
 - **Concurrent sessions** — run parent and subagent requests in parallel
-- **Subagent model selection** — primary agents get 1M context; subagents get 200k, preserving rate-limit budget
+- **Subagent model selection** — extended-context opt-ins stay on primary agents; subagents use base models to preserve rate-limit budget
 - **Auto token refresh** — expired OAuth tokens are refreshed automatically; requests continue without interruption
 - **Passthrough mode** — forward tool calls to the client instead of executing internally
 - **Multimodal** — images, documents, file attachments, and multimodal tool results pass through to Claude
