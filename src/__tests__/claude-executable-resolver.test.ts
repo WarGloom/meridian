@@ -29,6 +29,7 @@ type Deps = Parameters<typeof resolveClaudeExecutable>[0]
 function makeDeps(overrides: Partial<NonNullable<Deps>> = {}): NonNullable<Deps> {
   return {
     existsSync: () => false,
+    readFileSync: () => JSON.stringify({ version: "9.9.9" }),
     statSync: () => ({ size: 0 }),
     exec: async () => ({ stdout: "" }),
     resolvePackage: (specifier) => {
@@ -128,6 +129,27 @@ describe("resolveClaudeExecutable: bundled binary with stub-size guard", () => {
     expect(await resolveClaudeExecutable(deps)).toBe(expectedBin)
   })
 
+  it("skips real bundled binaries older than the Claude 5-capable minimum", async () => {
+    const pkgJson = "/m/claude-code/package.json"
+    const expectedBin = BIN(pkgJson, "bin", "claude.exe")
+    const pathClaude = "/usr/local/bin/claude"
+    const deps = makeDeps({
+      platform: "linux",
+      resolvePackage: (s) => {
+        if (s === "@anthropic-ai/claude-code/package.json") return pkgJson
+        throw new Error("not configured")
+      },
+      existsSync: (p) => p === expectedBin || p === pathClaude,
+      readFileSync: () => JSON.stringify({ version: "2.1.119" }),
+      statSync: () => ({ size: 200_000_000 }),
+      exec: async () => ({ stdout: `${pathClaude}\n` }),
+    })
+    expect(await resolveClaudeExecutableWithSource(deps)).toEqual({
+      path: pathClaude,
+      source: "path-lookup",
+    })
+  })
+
   it("falls through when the package itself can't be resolved", async () => {
     const deps = makeDeps({
       resolvePackage: () => {
@@ -213,6 +235,27 @@ describe("resolveClaudeExecutable: platform-specific peer package", () => {
       resolvePackage: () => { throw new Error("not installed") },
     })
     expect(await resolveClaudeExecutable(deps)).toBeNull()
+  })
+
+  it("skips platform package binaries older than the Claude 5-capable minimum", async () => {
+    const platformPkg = "/m/claude-code-darwin-arm64/package.json"
+    const platformBin = BIN(platformPkg, "claude")
+    const pathClaude = "/opt/homebrew/bin/claude"
+    const deps = makeDeps({
+      platform: "darwin",
+      arch: "arm64",
+      resolvePackage: (s) => {
+        if (s === "@anthropic-ai/claude-code-darwin-arm64/package.json") return platformPkg
+        throw new Error("not configured")
+      },
+      existsSync: (p) => p === platformBin || p === pathClaude,
+      readFileSync: () => JSON.stringify({ version: "2.1.119" }),
+      exec: async () => ({ stdout: `${pathClaude}\n` }),
+    })
+    expect(await resolveClaudeExecutableWithSource(deps)).toEqual({
+      path: pathClaude,
+      source: "path-lookup",
+    })
   })
 })
 
@@ -359,6 +402,25 @@ describe("resolveClaudeExecutable: priority ordering", () => {
       exec: async () => ({ stdout: "/usr/local/bin/claude\n" }),
     })
     expect(await resolveClaudeExecutable(deps)).toBe(expectedBin)
+  })
+
+  it("new enough bundled binary beats PATH lookup", async () => {
+    const bundledPkg = "/m/cc/package.json"
+    const expectedBin = BIN(bundledPkg, "bin", "claude.exe")
+    const deps = makeDeps({
+      resolvePackage: (s) => {
+        if (s === "@anthropic-ai/claude-code/package.json") return bundledPkg
+        throw new Error("not configured")
+      },
+      existsSync: (p) => p === expectedBin || p === "/usr/local/bin/claude",
+      readFileSync: () => JSON.stringify({ version: "2.1.197" }),
+      statSync: () => ({ size: 213_404_000 }),
+      exec: async () => ({ stdout: "/usr/local/bin/claude\n" }),
+    })
+    expect(await resolveClaudeExecutableWithSource(deps)).toEqual({
+      path: expectedBin,
+      source: "bundled",
+    })
   })
 
   it("platform package beats PATH lookup when bundled is a stub", async () => {
