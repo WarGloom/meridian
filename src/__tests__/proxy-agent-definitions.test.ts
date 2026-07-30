@@ -113,8 +113,8 @@ describe("buildAgentDefinitions", () => {
 
 describe("mapModelTier", () => {
   it("should map opus models", () => {
-    expect(mapModelTier("anthropic/claude-opus-4-6")).toBe("opus[1m]")
-    expect(mapModelTier("claude-opus-4")).toBe("opus[1m]")
+    expect(mapModelTier("anthropic/claude-opus-4-6")).toBe("opus")
+    expect(mapModelTier("claude-opus-4")).toBe("opus")
   })
 
   it("should map sonnet models", () => {
