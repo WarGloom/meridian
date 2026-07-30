@@ -12634,7 +12634,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
         await withShutdownDeadline(joined)
       })()
       return closePromise
-    }
     },
   }
   server.once("error", () => {
