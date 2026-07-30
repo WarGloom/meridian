@@ -1,13 +1,14 @@
 /**
  * Passthrough Architecture Concept Tests
  *
- * Tests the idea of using maxTurns:2 so the SDK generates one response
- * and stops. If that response has tool_use blocks, we forward them to
- * OpenCode. OpenCode handles the tools (including Task for agent delegation)
- * and sends tool_result back.
+ * Tests the idea of using a passthrough maxTurns ceiling so the SDK can
+ * generate a tool_use response without exhausting variable internal turns.
+ * If that response has tool_use blocks, we forward them to OpenCode. OpenCode
+ * handles the tools (including Task for agent delegation) and sends tool_result
+ * back.
  *
  * Key questions this validates:
- * 1. With maxTurns:2, does the SDK return tool_use blocks in the response?
+ * 1. With a passthrough maxTurns ceiling, does the SDK return tool_use blocks?
  * 2. Can we correctly extract tool_use blocks and return stop_reason:"tool_use"?
  * 3. Can we accept tool_result and resume the session?
  * 4. Does Task tool_use get forwarded to OpenCode (not handled internally)?
@@ -15,7 +16,7 @@
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
 
-// Simulated SDK messages for maxTurns:2 scenarios
+// Simulated SDK messages for passthrough maxTurns scenarios
 const toolUseMessage = {
   type: "assistant" as const,
   message: {

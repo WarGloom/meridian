@@ -285,41 +285,39 @@ describe("buildQueryOptions", () => {
 
   it("keeps maxTurns at 4 with deferred tools — ToolSearch discovery is a real round-trip, so the cap must not apply (#547)", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, hasDeferredTools: true }))
-    expect(result.options.maxTurns).toBe(4)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 4 in passthrough mode when resume AND deferred tools are both active (resume rehydration is inline; only the discovery turn adds)", () => {
+  it("keeps the fixed passthrough ceiling when resume and deferred tools are both active", () => {
     const result = buildQueryOptions(makeContext({
       passthrough: true,
       resumeSessionId: "sess-123",
       hasDeferredTools: true,
     }))
-    expect(result.options.maxTurns).toBe(4)
+    expect(result.options.maxTurns).toBe(30)
   })
-
   it("keeps maxTurns at 6 with advisor — the advisor executes call/result/answer, so the cap must not apply", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7" }))
-    expect(result.options.maxTurns).toBe(6)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 6 in passthrough mode with advisor + resume", () => {
+  it("keeps the fixed passthrough ceiling with advisor and resume", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", resumeSessionId: "sess-123" }))
-    expect(result.options.maxTurns).toBe(6)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 7 in passthrough mode with advisor + deferred tools (base 3 + discovery 1 + advisor 3)", () => {
+  it("keeps the fixed passthrough ceiling with advisor and deferred tools", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", hasDeferredTools: true }))
-    expect(result.options.maxTurns).toBe(7)
+    expect(result.options.maxTurns).toBe(30)
   })
-
-  it("sets maxTurns to 7 in passthrough mode with advisor + resume + deferred tools (all three active)", () => {
+  it("keeps the fixed passthrough ceiling with advisor, resume, and deferred tools", () => {
     const result = buildQueryOptions(makeContext({
       passthrough: true,
       advisorModel: "claude-opus-4-7",
       resumeSessionId: "sess-123",
       hasDeferredTools: true,
     }))
-    expect(result.options.maxTurns).toBe(7)
+    expect(result.options.maxTurns).toBe(30)
   })
 
   it("does not bump maxTurns in non-passthrough mode when advisor is set", () => {

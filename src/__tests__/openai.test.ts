@@ -1729,11 +1729,13 @@ describe("buildModelList", () => {
     const models = buildModelList(false)
     const fable = models.find(m => m.id === "claude-fable-5")!
     const sonnet5 = models.find(m => m.id === "claude-sonnet-5")!
-    const sonnet46 = models.find(m => m.id === "claude-sonnet-4-6")!
+    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
     const opus5 = models.find(m => m.id === "claude-opus-5")!
     const opus46 = models.find(m => m.id === "claude-opus-4-6")!
     const opus47 = models.find(m => m.id === "claude-opus-4-7")!
     const opus48 = models.find(m => m.id === "claude-opus-4-8")!
+    expect(fable.context_window).toBe(1_000_000)
+    expect(sonnet5.context_window).toBe(1_000_000)
     expect(sonnet.context_window).toBe(200_000)
     expect(opus5.context_window).toBe(1_000_000)
     expect(opus46.context_window).toBe(200_000)
