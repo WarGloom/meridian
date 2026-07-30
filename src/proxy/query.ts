@@ -277,6 +277,8 @@ export interface BuildQueryResult {
   options: Options
 }
 
+const PASSTHROUGH_MAX_TURNS = 30
+
 /**
  * NOTE: agent-specific (passthrough mode).
  *
