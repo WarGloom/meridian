@@ -55,7 +55,7 @@ installMcpToolsMock(() => ({
 
 // Fix auth status so mapModelToClaudeModel always picks the max/1m path
 installModelsMock(() => ({
-  mapModelToClaudeModel: (model: string, sub?: string | null, agentMode?: string | null) => {
+  mapModelToClaudeModel: (model: string, _sub?: string | null, agentMode?: string | null) => {
     const base = model.toLowerCase()
     if (base.includes("opus")) return agentMode === "subagent" ? "opus" : "opus[1m]"
     if (base.includes("haiku")) return "haiku"
