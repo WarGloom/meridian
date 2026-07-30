@@ -177,6 +177,7 @@ export function lookupSession(
         messageHashes: shared.messageHashes,
         sdkMessageUuids: shared.sdkMessageUuids,
         contextUsage: shared.contextUsage,
+        clientContextHash: shared.clientContextHash,
       }
       const result = classifyLineage(state, messages, sessionId)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -205,6 +206,7 @@ export function lookupSession(
         messageHashes: shared.messageHashes,
         sdkMessageUuids: shared.sdkMessageUuids,
         contextUsage: shared.contextUsage,
+        clientContextHash: shared.clientContextHash,
       }
       const result = classifyLineage(state, messages, fp)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -242,6 +244,7 @@ export function getSessionByClaudeId(claudeSessionId: string): SessionState | un
       messageHashes: shared.messageHashes,
       sdkMessageUuids: shared.sdkMessageUuids,
       contextUsage: shared.contextUsage,
+      clientContextHash: shared.clientContextHash,
     })
   }
 
@@ -258,7 +261,8 @@ export function storeSession(
   claudeSessionId: string,
   workingDirectory?: string,
   sdkMessageUuids?: Array<string | null>,
-  contextUsage?: TokenUsage
+  contextUsage?: TokenUsage,
+  clientContextHash?: string
 ) {
   if (!claudeSessionId) return
   const lineageHash = computeLineageHash(messages)
@@ -271,6 +275,7 @@ export function storeSession(
     messageHashes,
     sdkMessageUuids,
     ...(contextUsage ? { contextUsage } : {}),
+    ...(clientContextHash ? { clientContextHash } : {}),
   }
   // In-memory cache
   if (sessionId) sessionCache.set(sessionId, state)
@@ -291,7 +296,8 @@ export function storeSession(
       lineageHash,
       messageHashes,
       sdkMessageUuids,
-      contextUsage
+      contextUsage,
+      clientContextHash
     )
   }
 }

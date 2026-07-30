@@ -12,7 +12,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test"
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs"
+import { mkdtempSync, writeFileSync, rmSync } from "fs"
 import { join } from "path"
 import { tmpdir } from "os"
 import { assistantMessage } from "./helpers"
@@ -134,15 +134,11 @@ describe("Plugin integration — end-to-end via HTTP", () => {
     expect(res.status).toBe(200)
     await res.json()
 
-    // The SDK call should have received the modified system prompt. In
-    // meridian's text-prompt path, systemContext goes through the
-    // resolveSystemPrompt helper — we can assert on options.systemPrompt.
+    // The SDK call should have received the modified system text in the prompt.
     const captured = getCaptured()
     expect(captured).toBeTruthy()
-    const systemOpt = captured!.options?.systemPrompt as string | { append?: string }
-    const systemStr = typeof systemOpt === "string" ? systemOpt : systemOpt?.append ?? ""
-    expect(systemStr).toContain("[MARKED]")
-    expect(systemStr).toContain("you are helpful")
+    expect(captured!.prompt).toContain("[MARKED]")
+    expect(captured!.prompt).toContain("you are helpful")
   })
 
   it("respects adapter scoping — plugin only runs for its configured adapter", async () => {
@@ -177,9 +173,7 @@ describe("Plugin integration — end-to-end via HTTP", () => {
     }, { "x-opencode-session": "integ-scope-1", "User-Agent": "opencode/1.0.0" })
 
     const opencodeCaptured = getCaptured()
-    const opencodeSystem = opencodeCaptured?.options?.systemPrompt as string | { append?: string }
-    const opencodeStr = typeof opencodeSystem === "string" ? opencodeSystem : opencodeSystem?.append ?? ""
-    expect(opencodeStr).not.toContain("[PI_ONLY]")
+    expect(opencodeCaptured?.prompt).not.toContain("[PI_ONLY]")
 
     // Now as pi (no session header, meridian defaults to opencode for unknown UAs
     // — pi requires MERIDIAN_DEFAULT_AGENT=pi or the x-meridian-agent header).
@@ -193,9 +187,7 @@ describe("Plugin integration — end-to-end via HTTP", () => {
     }, { "x-meridian-agent": "pi" })
 
     const piCaptured = getCaptured()
-    const piSystem = piCaptured?.options?.systemPrompt as string | { append?: string }
-    const piStr = typeof piSystem === "string" ? piSystem : piSystem?.append ?? ""
-    expect(piStr).toContain("[PI_ONLY]")
+    expect(piCaptured?.prompt).toContain("[PI_ONLY]")
   })
 
   it("plugin errors are isolated — a throwing plugin doesn't crash the request", async () => {
@@ -242,9 +234,7 @@ describe("Plugin integration — end-to-end via HTTP", () => {
     expect(res.status).toBe(200)
     await res.json()
     const captured = getCaptured()
-    const systemOpt = captured?.options?.systemPrompt as string | { append?: string }
-    const systemStr = typeof systemOpt === "string" ? systemOpt : systemOpt?.append ?? ""
-    expect(systemStr).toContain("[M2]")
+    expect(captured?.prompt).toContain("[M2]")
   })
 
   it("POST /plugins/reload picks up changes without restart", async () => {

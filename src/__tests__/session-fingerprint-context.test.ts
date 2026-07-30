@@ -117,6 +117,24 @@ beforeEach(() => {
 })
 
 describe("Fingerprint resume: stable across dynamic systemContext", () => {
+  it("does not append unchanged systemContext again on resume", async () => {
+    const app = createTestApp()
+
+    await postNoSession(app, [
+      { role: "user", content: "hello" },
+    ], "sdk-stable", "Stable system context")
+
+    capturedQueryParams = null
+    await postNoSession(app, [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "how are you?" },
+    ], "sdk-stable", "Stable system context")
+
+    expect(getCaptured()?.options?.resume).toBe("sdk-stable")
+    expect(getCaptured()?.prompt).not.toContain("Stable system context")
+  })
+
   it("resumes when systemContext changes between requests (non-stream)", async () => {
     const app = createTestApp()
 
@@ -133,8 +151,11 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
       { role: "user", content: "how are you?" },
     ], "sdk-1", "System v2: file tree has 15 files, 3 diagnostics")
 
-    // MUST resume — fingerprint doesn't include systemContext
+    // MUST resume — fingerprint doesn't include systemContext.
     expect(getCaptured()?.options?.resume).toBe("sdk-1")
+    // Fresh client context must still be sent on the resumed SDK call so
+    // model-specific identity/system text can update across resumes.
+    expect(getCaptured()?.prompt).toContain("System v2: file tree has 15 files, 3 diagnostics")
   })
 
   it("resumes when systemContext changes between requests (stream)", async () => {

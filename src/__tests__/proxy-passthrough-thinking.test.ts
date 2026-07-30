@@ -4,12 +4,12 @@
  * Two bugs caused Claude edits via passthrough to show prose instead of
  * diff UI in OpenCode:
  *
- * Bug 1 — Non-streaming Turn 2 contamination:
- *   The SDK needs maxTurns:2 in passthrough mode to avoid crashing. But Turn 2
- *   runs after the blocked tool call completes, and Claude generates a prose
- *   summary ("The edit has been forwarded to your local environment...").
- *   Meridian was returning both Turn 1 (tool_use) + Turn 2 (thinking + prose)
- *   in one response, which confused OpenCode's diff renderer.
+ * Bug 1 — Non-streaming later-turn contamination:
+ *   The SDK needs a passthrough maxTurns ceiling high enough to avoid crashing.
+ *   Later SDK turns can run after the blocked tool call completes, and Claude
+ *   generates a prose summary ("The edit has been forwarded to your local
+ *   environment..."). Meridian was returning both Turn 1 (tool_use) and later
+ *   thinking/prose in one response, which confused OpenCode's diff renderer.
  *   Fix: once Turn 1 has produced tool_use blocks, ignore all content from
  *   subsequent assistant turns.
  *
