@@ -1706,14 +1706,19 @@ describe("buildModelList", () => {
     }
   })
 
-  it("Max subscription gets 1M context for all opus variants, 200k for sonnet", () => {
+  it("Max subscription gets 1M context for fable and sonnet-5, with opuses at 1M and legacy sonnet-4-6 at 200k", () => {
     const models = buildModelList(true)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
+    const fable = models.find(m => m.id === "claude-fable-5")!
+    const sonnet5 = models.find(m => m.id === "claude-sonnet-5")!
+    const sonnet46 = models.find(m => m.id === "claude-sonnet-4-6")!
     const opus5 = models.find(m => m.id === "claude-opus-5")!
     const opus46 = models.find(m => m.id === "claude-opus-4-6")!
     const opus47 = models.find(m => m.id === "claude-opus-4-7")!
     const opus48 = models.find(m => m.id === "claude-opus-4-8")!
-    expect(sonnet.context_window).toBe(200_000)
+
+    expect(fable.context_window).toBe(1_000_000)
+    expect(sonnet5.context_window).toBe(1_000_000)
+    expect(sonnet46.context_window).toBe(200_000)
     expect(opus5.context_window).toBe(1_000_000)
     expect(opus46.context_window).toBe(1_000_000)
     expect(opus47.context_window).toBe(1_000_000)
@@ -1722,7 +1727,9 @@ describe("buildModelList", () => {
 
   it("non-Max keeps legacy Opus 4.6 at 200k and gives newer Opus its native 1M window", () => {
     const models = buildModelList(false)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
+    const fable = models.find(m => m.id === "claude-fable-5")!
+    const sonnet5 = models.find(m => m.id === "claude-sonnet-5")!
+    const sonnet46 = models.find(m => m.id === "claude-sonnet-4-6")!
     const opus5 = models.find(m => m.id === "claude-opus-5")!
     const opus46 = models.find(m => m.id === "claude-opus-4-6")!
     const opus47 = models.find(m => m.id === "claude-opus-4-7")!
@@ -1760,6 +1767,21 @@ describe("buildModelList", () => {
     expect(caps.thinking.supported).toBe(true)
     expect(caps.thinking.types.adaptive.supported).toBe(true)
     expect(caps.thinking.types.enabled.supported).toBe(true)
+  })
+
+  it("advertises 200k context when the global 1M context support switch is off", () => {
+    const previous = process.env.MERIDIAN_1M_CONTEXT_SUPPORT
+    process.env.MERIDIAN_1M_CONTEXT_SUPPORT = "0"
+    let models: ReturnType<typeof buildModelList>
+    try {
+      models = buildModelList(true, 123)
+    } finally {
+      if (previous === undefined) delete process.env.MERIDIAN_1M_CONTEXT_SUPPORT
+      else process.env.MERIDIAN_1M_CONTEXT_SUPPORT = previous
+    }
+    expect(models.find(m => m.id === "claude-fable-5")!.context_window).toBe(200_000)
+    expect(models.find(m => m.id === "claude-sonnet-5")!.context_window).toBe(200_000)
+    expect(models.find(m => m.id === "claude-opus-4-8")!.context_window).toBe(200_000)
   })
 
   it("legacy Haiku 4.5 is always 200k regardless of subscription", () => {
