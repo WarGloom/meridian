@@ -16,6 +16,8 @@
  * and don't benefit from Meridian's session resumption.
  */
 
+import { is1mContextSupportEnabled } from "./models"
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -946,15 +948,31 @@ const FULL_CAPABILITIES: ModelCapabilities = Object.freeze({
  *   200k on every plan because Sonnet 1M is always billed as Extra Usage, and
  *   Haiku has no 1M variant at all.
  */
-export function buildModelList(extendedContextIncluded: boolean, now = Math.floor(Date.now() / 1000)): OpenAiModel[] {
+export function buildModelList(
+  extendedContextIncluded: boolean,
+  now = Math.floor(Date.now() / 1000),
+  oneMillionContextEnabled = is1mContextSupportEnabled(),
+): OpenAiModel[] {
+  const currentModelContextWindow = oneMillionContextEnabled ? 1_000_000 : 200_000
+  const maxExtendedContextWindow =
+    extendedContextIncluded && oneMillionContextEnabled ? 1_000_000 : 200_000
   return [
+    {
+      id: "claude-fable-5",
+      object: "model",
+      created: now,
+      owned_by: "anthropic",
+      display_name: "Claude Fable 5",
+      context_window: currentModelContextWindow,
+      capabilities: FULL_CAPABILITIES,
+    },
     {
       id: "claude-sonnet-5",
       object: "model",
       created: now,
       owned_by: "anthropic",
       display_name: "Claude Sonnet 5",
-      context_window: 200_000,
+      context_window: currentModelContextWindow,
       capabilities: FULL_CAPABILITIES,
     },
     {
@@ -981,7 +999,7 @@ export function buildModelList(extendedContextIncluded: boolean, now = Math.floo
       created: now,
       owned_by: "anthropic",
       display_name: "Claude Opus 4.6",
-      context_window: extendedContextIncluded ? 1_000_000 : 200_000,
+      context_window: maxExtendedContextWindow,
       capabilities: FULL_CAPABILITIES,
     },
     {
@@ -990,7 +1008,7 @@ export function buildModelList(extendedContextIncluded: boolean, now = Math.floo
       created: now,
       owned_by: "anthropic",
       display_name: "Claude Opus 4.7",
-      context_window: extendedContextIncluded ? 1_000_000 : 200_000,
+      context_window: maxExtendedContextWindow,
       capabilities: FULL_CAPABILITIES,
     },
     {
@@ -999,16 +1017,7 @@ export function buildModelList(extendedContextIncluded: boolean, now = Math.floo
       created: now,
       owned_by: "anthropic",
       display_name: "Claude Opus 4.8",
-      context_window: extendedContextIncluded ? 1_000_000 : 200_000,
-      capabilities: FULL_CAPABILITIES,
-    },
-    {
-      id: "claude-fable-5",
-      object: "model",
-      created: now,
-      owned_by: "anthropic",
-      display_name: "Claude Fable 5",
-      context_window: extendedContextIncluded ? 1_000_000 : 200_000,
+      context_window: maxExtendedContextWindow,
       capabilities: FULL_CAPABILITIES,
     },
     {
