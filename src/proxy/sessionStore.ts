@@ -83,6 +83,8 @@ export interface StoredSession {
   passthroughToolCallIds?: string[]
   /** Last observed token usage for this Claude session */
   contextUsage?: TokenUsage
+  /** Hash of the client system context already persisted in this SDK session. */
+  clientContextHash?: string
   /** Previous Claude session ID preserved when the session mapping is replaced.
    *  Enables recovery when a lineage bug (e.g. false compaction) causes the
    *  original session to be abandoned and a new one started. */
@@ -1219,6 +1221,7 @@ export function storeSharedSession(
   currentTranscript?: TranscriptLocator,
   sourceTranscript?: TranscriptLocator,
   expectedGeneration?: StoredSessionGeneration | null,
+  clientContextHash?: string,
 ): StoredSessionGeneration | false {
   if (currentTranscript !== undefined) {
     validateTranscriptLocator(currentTranscript, claudeSessionId)
@@ -1282,6 +1285,7 @@ export function storeSharedSession(
       contextUsage: contextUsage ?? existing?.contextUsage,
       ...(resolvedCurrentTranscript ? { currentTranscript: resolvedCurrentTranscript } : {}),
       ...(previousTranscript ? { previousTranscript } : {}),
+      clientContextHash: clientContextHash ?? existing?.clientContextHash,
       ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),
     }
 
@@ -1486,6 +1490,7 @@ export interface SharedSessionAndPriorityAssignmentOptions {
   passthroughToolCallIds?: string[] | null
   currentTranscript?: TranscriptLocator
   sourceTranscript?: TranscriptLocator
+  clientContextHash?: string
   expectedMappingGeneration: StoredSessionGeneration
   /** Original routed mapping retained across chained publications for rollback. */
   rollbackMappingKey?: string
@@ -1605,6 +1610,7 @@ export function storeSharedSessionAndPriorityAssignment(
       passthroughToolCallAssistantUuid: options.passthroughToolCallAssistantUuid ?? undefined,
       passthroughToolCallIds: options.passthroughToolCallIds ?? undefined,
       contextUsage: options.contextUsage,
+      clientContextHash: options.clientContextHash ?? existing?.clientContextHash,
       ...(resolvedCurrentTranscript ? { currentTranscript: resolvedCurrentTranscript } : {}),
       ...(previousTranscript ? { previousTranscript } : {}),
       ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),

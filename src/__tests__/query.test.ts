@@ -165,41 +165,39 @@ describe("buildQueryOptions", () => {
 
   it("keeps maxTurns at 4 with deferred tools — ToolSearch discovery is a real round-trip, so the cap must not apply (#547)", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, hasDeferredTools: true }))
-    expect(result.options.maxTurns).toBe(4)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 4 in passthrough mode when resume AND deferred tools are both active (resume rehydration is inline; only the discovery turn adds)", () => {
+  it("keeps the fixed passthrough ceiling when resume and deferred tools are both active", () => {
     const result = buildQueryOptions(makeContext({
       passthrough: true,
       resumeSessionId: "sess-123",
       hasDeferredTools: true,
     }))
-    expect(result.options.maxTurns).toBe(4)
+    expect(result.options.maxTurns).toBe(30)
   })
-
   it("keeps maxTurns at 6 with advisor — the advisor executes call/result/answer, so the cap must not apply", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7" }))
-    expect(result.options.maxTurns).toBe(6)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 6 in passthrough mode with advisor + resume", () => {
+  it("keeps the fixed passthrough ceiling with advisor and resume", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", resumeSessionId: "sess-123" }))
-    expect(result.options.maxTurns).toBe(6)
+    expect(result.options.maxTurns).toBe(30)
   })
 
-  it("sets maxTurns to 7 in passthrough mode with advisor + deferred tools (base 3 + discovery 1 + advisor 3)", () => {
+  it("keeps the fixed passthrough ceiling with advisor and deferred tools", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7", hasDeferredTools: true }))
-    expect(result.options.maxTurns).toBe(7)
+    expect(result.options.maxTurns).toBe(30)
   })
-
-  it("sets maxTurns to 7 in passthrough mode with advisor + resume + deferred tools (all three active)", () => {
+  it("keeps the fixed passthrough ceiling with advisor, resume, and deferred tools", () => {
     const result = buildQueryOptions(makeContext({
       passthrough: true,
       advisorModel: "claude-opus-4-7",
       resumeSessionId: "sess-123",
       hasDeferredTools: true,
     }))
-    expect(result.options.maxTurns).toBe(7)
+    expect(result.options.maxTurns).toBe(30)
   })
 
   it("does not bump maxTurns in non-passthrough mode when advisor is set", () => {
@@ -212,15 +210,18 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp).toBeDefined()
     expect(sp.type).toBe("preset")
-    expect(sp.append).toStartWith("Be helpful")
-    // Every preset request also carries the gitStatus provenance note (#694).
-    expect(sp.append).toContain(GIT_STATUS_PROVENANCE_NOTE)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport. Meridian's
+    // own preset addenda still use append.
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("uses raw system prompt in passthrough mode", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Be helpful")
+    expect(sp).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("omits system prompt when empty", () => {
@@ -231,6 +232,42 @@ describe("buildQueryOptions", () => {
   it("includes resume session ID when provided", () => {
     const result = buildQueryOptions(makeContext({ resumeSessionId: "sdk-123" }))
     expect((result.options as any).resume).toBe("sdk-123")
+  })
+
+  it("does not append client system context again on passthrough SDK resume", () => {
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      resumeSessionId: "sdk-123",
+      skipClientContextOnResume: true,
+      systemContext: "Agent instructions",
+    }))
+    const sp = (result.options as any).systemPrompt
+    expect((result.options as any).resume).toBe("sdk-123")
+    expect(sp).toBeUndefined()
+    expect(result.prompt).not.toContain("<client-system-instructions>")
+  })
+
+  it("keeps client system context on passthrough SDK fork", () => {
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      resumeSessionId: "sdk-123",
+      skipClientContextOnResume: true,
+      isUndo: true,
+      systemContext: "Agent instructions",
+    }))
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
+  })
+
+  it("does not repeat systemPrompt-placed client context on passthrough resume", () => {
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      resumeSessionId: "sdk-123",
+      skipClientContextOnResume: true,
+      systemContext: "Agent instructions",
+      clientSystemPromptPlacement: "systemPrompt",
+    }))
+    expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).not.toContain("<client-system-instructions>")
   })
 
   it("omits resume when not provided", () => {
@@ -474,9 +511,11 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toStartWith("Be helpful")
-    // Every preset request also carries the gitStatus provenance note (#694).
-    expect(sp.append).toContain(GIT_STATUS_PROVENANCE_NOTE)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport. Meridian's
+    // own preset addenda still use append.
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("uses preset with append in passthrough + settingSources", () => {
@@ -488,9 +527,11 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toStartWith("Be helpful")
-    // Every preset request also carries the gitStatus provenance note (#694).
-    expect(sp.append).toContain(GIT_STATUS_PROVENANCE_NOTE)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport. Meridian's
+    // own preset addenda still use append.
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
   it("appends only Meridian's own note when settingSources set but no systemContext", () => {
@@ -690,19 +731,22 @@ describe("buildQueryOptions", () => {
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
-    expect(sp.append).toStartWith("Agent instructions")
-    // Every preset request also carries the gitStatus provenance note (#694).
-    expect(sp.append).toContain(GIT_STATUS_PROVENANCE_NOTE)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport. Meridian's
+    // own preset addenda still use append.
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
-  it("skips preset when codeSystemPrompt is false in normal mode", () => {
+  it("sets empty systemPrompt when codeSystemPrompt is false in normal mode", () => {
     const result = buildQueryOptions(makeContext({
       passthrough: false,
       systemContext: "Agent instructions",
       codeSystemPrompt: false,
     }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Agent instructions")
+    expect(sp).toBe("")
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("forces systemPrompt='' when codeSystemPrompt false and no systemContext (defensive against preset fallback)", () => {
@@ -739,6 +783,7 @@ describe("buildQueryOptions", () => {
       clientSystemPrompt: false,
     }))
     expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).not.toContain("client-system-instructions")
   })
 
   it("includes client prompt when clientSystemPrompt is true (default)", () => {
@@ -747,7 +792,8 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPrompt: true,
     }))
-    expect((result.options as any).systemPrompt).toBe("Agent instructions")
+    expect((result.options as any).systemPrompt).toBeUndefined()
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
   it("all three controls work together: preset + client + settingSources", () => {
@@ -760,9 +806,11 @@ describe("buildQueryOptions", () => {
     }))
     const sp = (result.options as any).systemPrompt
     expect(sp.type).toBe("preset")
-    expect(sp.append).toStartWith("Agent instructions")
-    // Every preset request also carries the gitStatus provenance note (#694).
-    expect(sp.append).toContain(GIT_STATUS_PROVENANCE_NOTE)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport. Meridian's
+    // own preset addenda still use append.
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
     const opts = result.options as any
     expect(opts.settingSources).toEqual(["user", "project"])
   })
@@ -776,5 +824,6 @@ describe("buildQueryOptions", () => {
       clientSystemPrompt: false,
     }))
     expect((result.options as any).systemPrompt).toBe("")
+    expect(result.prompt).not.toContain("client-system-instructions")
   })
 })

@@ -2,7 +2,8 @@
  * Phase 2: Transparent Tool Handling Tests
  *
  * The proxy must NOT define its own tools. Instead, it should:
- * 1. Use maxTurns: 2 so Claude returns tool_use to the client (not executing internally)
+ * 1. Use a passthrough maxTurns ceiling so Claude can return tool_use to the client
+ *    without exhausting variable SDK internal turns
  * 2. Not inject MCP tools or blocked/allowed tool lists
  * 3. Let OpenCode control the tool execution loop
  *
@@ -14,9 +15,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
 import {
   messageStart,
   textBlockStart,
-  toolUseBlockStart,
   textDelta,
-  inputJsonDelta,
   blockStop,
   messageDelta,
   messageStop,
@@ -184,7 +183,7 @@ describe("Phase 2: Message format preservation", () => {
     else delete process.env.MERIDIAN_PASSTHROUGH
   })
 
-  it("should pass system prompt via appendSystemPrompt, not merged into messages", async () => {
+  it("should carry client system text in the prompt, not the SDK systemPrompt", async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hi" }]),
     ]
@@ -197,17 +196,16 @@ describe("Phase 2: Message format preservation", () => {
     }))
     await response.json()
 
-    // System prompt should be passed via systemPrompt option (append to Claude Code default)
+    // Client system text is carried in the prompt because large SDK systemPrompt
+    // values can be rejected by the Claude subscription transport.
     expect(capturedQueryParams).toBeDefined()
-    // The client's system prompt leads the append; Meridian's own addenda (the
-    // gitStatus provenance note, #694) follow it.
-    expect(capturedQueryParams.options.systemPrompt.type).toBe("preset")
-    expect(capturedQueryParams.options.systemPrompt.preset).toBe("claude_code")
-    expect(capturedQueryParams.options.systemPrompt.append).toStartWith("You are a helpful assistant.")
-    // Prompt text should NOT contain the system context (it's in the SDK option now)
+    // The client-provided system text stays out of the SDK systemPrompt payload.
+    // This adapter can explicitly disable the Claude Code preset, so only the
+    // absence of client text is contractual here.
+    expect(JSON.stringify(capturedQueryParams.options.systemPrompt ?? "")).not.toContain("You are a helpful assistant.")
     const prompt = capturedQueryParams.prompt
     expect(typeof prompt).toBe("string")
-    expect(prompt).not.toContain("You are a helpful assistant.")
+    expect(prompt).toContain("<client-system-instructions>\nYou are a helpful assistant.")
   })
 
   it("should include tool_result content in the prompt sent to SDK", async () => {

@@ -118,6 +118,8 @@ export interface QueryContext {
   earlyStop?: boolean
   /** SDK session ID for resume (if continuing a session) */
   resumeSessionId?: string
+  /** The resumed passthrough session already has this exact client context. */
+  skipClientContextOnResume?: boolean
   /** Whether this is an undo operation */
   isUndo: boolean
   /** Resume at this SDK assistant-message UUID (undo rollback point or
@@ -160,6 +162,8 @@ export interface QueryContext {
   codeSystemPrompt?: boolean
   /** Include the client agent's system prompt */
   clientSystemPrompt?: boolean
+  /** Where to place the client system prompt when the Claude Code preset is disabled. */
+  clientSystemPromptPlacement?: "prompt" | "systemPrompt"
   /** Enable auto-memory (read + write across sessions) */
   memory?: boolean
   /** Enable background memory consolidation (dreaming) */
@@ -191,6 +195,8 @@ export interface BuildQueryResult {
   prompt: QueryContext["prompt"]
   options: Options
 }
+
+const PASSTHROUGH_MAX_TURNS = 30
 
 /**
  * NOTE: agent-specific (passthrough mode).
@@ -326,26 +332,51 @@ export const GIT_STATUS_PROVENANCE_NOTE =
   `the current tree.\n` +
   `</meridian-note>`
 
+function buildClientContext(systemContext: string | undefined, includeClient: boolean): string | undefined {
+  if (!includeClient || !systemContext) return undefined
+  return `<client-system-instructions>\n${systemContext}\n</client-system-instructions>`
+}
+
+function prependClientContextToPrompt(
+  prompt: QueryContext["prompt"],
+  clientContext: string | undefined,
+): QueryContext["prompt"] {
+  if (!clientContext) return prompt
+  if (typeof prompt === "string") {
+    return `${clientContext}\n\n${prompt}`
+  }
+
+  return (async function* () {
+    yield {
+      type: "user" as const,
+      message: { role: "user" as const, content: clientContext },
+      parent_tool_use_id: null,
+    }
+    yield* prompt
+  })()
+}
+
 function resolveSystemPrompt(
-  systemContext: string | undefined,
+  hasClientContext: boolean,
+  clientSystemPromptOption: string | undefined,
   passthrough: boolean,
   settingSources: SettingSource[] | undefined,
   codeSystemPrompt: boolean | undefined,
-  clientSystemPrompt: boolean | undefined,
   cwdNote: string,
 ): { systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string } } {
   const hasSettings = settingSources != null && settingSources.length > 0
-  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && !!systemContext))
-  const includeClient = clientSystemPrompt ?? true
-  const clientContext = includeClient ? systemContext : undefined
+  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && hasClientContext))
+  const append = cwdNote || undefined
 
   if (usePreset) {
     // Always non-empty: the gitStatus correction applies to every preset
     // request, whether or not the client sent a system prompt.
-    const append = [clientContext, cwdNote, GIT_STATUS_PROVENANCE_NOTE].filter(Boolean).join("")
-    return { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append } }
+    const presetAppend = [append, GIT_STATUS_PROVENANCE_NOTE].filter(Boolean).join("")
+    return { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: presetAppend } }
   }
-  const append = [clientContext, cwdNote].filter(Boolean).join("") || undefined
+  if (clientSystemPromptOption) {
+    return append ? { systemPrompt: `${clientSystemPromptOption}\n\n${append}` } : { systemPrompt: clientSystemPromptOption }
+  }
   if (append) return { systemPrompt: append }
   // Defensive: when `codeSystemPrompt: false` is explicit and there's
   // nothing to append, force an empty-string system prompt so the SDK
@@ -361,17 +392,34 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
   const {
     prompt, model, workingDirectory, clientWorkingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv, hasDeferredTools,
-    resumeSessionId, isUndo, resumeSessionAtUuid, forkSession, forkSessionId, sdkHooks, blockedTools, incompatibleTools,
+    resumeSessionId, skipClientContextOnResume, isUndo, resumeSessionAtUuid, forkSession, forkSessionId, sdkHooks, blockedTools, incompatibleTools,
     mcpServerName, allowedMcpTools, onStderr,
-    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt,
-    memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories,
+    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt, clientSystemPromptPlacement,
+    memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories, advisorModel,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
+  const includeClient = clientSystemPrompt ?? true
+  const useClientSystemPromptOption =
+    clientSystemPromptPlacement === "systemPrompt" &&
+    codeSystemPrompt !== true &&
+    includeClient &&
+    systemContext.trim().length > 0
+  const clientContext = buildClientContext(systemContext, includeClient)
+  // The resumed SDK session already contains the client instructions from its
+  // first turn. Re-injecting them into every continuation appends another full
+  // copy to the conversation, which can consume tens of thousands of tokens
+  // per client-side tool result. Fresh and forked sessions still receive the
+  // current client context.
+  const resumeHasClientContext = Boolean(
+    passthrough && resumeSessionId && !isUndo && skipClientContextOnResume,
+  )
+  const promptClientContext = resumeHasClientContext || useClientSystemPromptOption ? undefined : clientContext
+  const clientSystemPromptOption = resumeHasClientContext || !useClientSystemPromptOption ? undefined : systemContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
   return {
-    prompt,
+    prompt: prependClientContextToPrompt(prompt, promptClientContext),
     options: {
       // Force Node as the executable. The claude-agent-sdk auto-detects Bun
       // via process.versions.bun and defaults to spawning `bun cli.js`.
@@ -400,7 +448,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(stream || passthrough ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...resolveSystemPrompt(systemContext, passthrough, settingSources, codeSystemPrompt, clientSystemPrompt, cwdNote),
+      ...resolveSystemPrompt(clientContext != null, clientSystemPromptOption, passthrough, settingSources, codeSystemPrompt, cwdNote),
       ...(passthrough
         ? {
             // Strip the SDK's ~25k-token built-in tool catalog from the
@@ -430,8 +478,8 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       // gating them on settingSources silently re-enabled auto-memory (the
       // SDK's built-in default) whenever claudeMd was "off".
       settings: {
-        autoMemoryEnabled: ctx.memory ?? true,
-        autoDreamEnabled: ctx.dreaming ?? false,
+        autoMemoryEnabled: memory ?? true,
+        autoDreamEnabled: dreaming ?? false,
         // Always explicit, for the same reason as the memory keys above: an
         // omitted key falls back to the subprocess default, which is to run
         // the check. `webFetchPreflight` is the positive form the settings
@@ -479,20 +527,12 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
         // opted in, and silently disable them for everyone who did not.
         ENABLE_CLAUDEAI_MCP_SERVERS:
           !passthrough && ctx.claudeAiConnectors === true ? "true" : "false",
-        // Passthrough: suppress the CLI's "# Scratchpad Directory" context
-        // block (#627). It advertises a PROXY-HOST path, but the CLIENT
-        // executes the tools — OpenCode 1.18+ permission-blocks writes to
-        // that alien path (external_directory), dead-ending headless runs.
-        // The CLI skips the block when CLAUDE_CODE_SESSION_KIND=bg — its own
-        // headless-background mode, which is semantically what this
-        // subprocess is. All other "bg" effects are TUI rendering (no TUI
-        // here) or CLAUDE_JOB_DIR-gated bookkeeping (we don't set it) —
-        // audited against the bundled CLI. Kill switch:
-        // MERIDIAN_SUPPRESS_SCRATCHPAD=0. Profile envOverrides spread below
-        // and win if the operator sets an explicit value.
-        ...(passthrough && process.env.MERIDIAN_SUPPRESS_SCRATCHPAD !== "0"
-          ? { CLAUDE_CODE_SESSION_KIND: "bg" }
-          : {}),
+        // Do not set CLAUDE_CODE_SESSION_KIND=bg for passthrough requests.
+        // Claude Code 2.1.198 treats it as a real daemon-managed background
+        // job, so the client's next tool_result turn cannot resume the SDK
+        // session ("currently running as a background agent"). Profile
+        // envOverrides still win below when an operator explicitly needs a
+        // session kind.
         // When running as root (Docker, Unraid, NAS), set IS_SANDBOX=1 to
         // bypass the SDK's root check. Without this, the SDK exits with:
         // "--dangerously-skip-permissions cannot be used with root/sudo"
@@ -524,7 +564,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(fallbackModel ? { fallbackModel } : {}),
       ...(sdkDebug ? { debug: true } : {}),
       ...(additionalDirectories && additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-      ...(ctx.advisorModel ? { advisorModel: ctx.advisorModel } : {}),
+      ...(advisorModel ? { advisorModel } : {}),
     }
   }
 }

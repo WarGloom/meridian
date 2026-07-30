@@ -66,6 +66,8 @@ export interface SessionState {
   /** Exact SDK transcript roots for cross-process lifecycle retention. */
   currentTranscript?: { sessionId: string; configDir: string; projectDir?: string }
   previousTranscript?: { sessionId: string; configDir: string; projectDir?: string }
+  /** Hash of the client system context already persisted in this SDK session. */
+  clientContextHash?: string
 }
 
 /**
