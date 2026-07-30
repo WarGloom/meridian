@@ -29,9 +29,11 @@ import {
   blockStop,
   parseSSE,
 } from "./helpers"
+import { UpstreamIdleError } from "../proxy/streamIdleGuard"
 
 let mockMessages: any[] = []
 let mockErrorAfter: number | null = null
+let mockStreamError: Error | null = null
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: () => {
@@ -41,7 +43,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
         yield msg
         yielded++
         if (mockErrorAfter !== null && yielded >= mockErrorAfter) {
-          throw new Error("429 Too Many Requests - rate limit exceeded")
+          throw mockStreamError ?? new Error("429 Too Many Requests - rate limit exceeded")
         }
       }
     })()
@@ -93,6 +95,7 @@ describe("Stream error recovery after message_start", () => {
   beforeEach(() => {
     mockMessages = []
     mockErrorAfter = null
+    mockStreamError = null
     clearSessionCache()
   })
 
@@ -216,5 +219,21 @@ describe("Stream error recovery after message_start", () => {
     // is the shape an autonomous loop reads as a completed, empty turn.
     const delta = events[messageDeltaIdx]?.data as any
     expect(delta.delta.stop_reason).toBe("max_tokens")
+  })
+
+  it("should close upstream idle errors after message_stop without a client error event", async () => {
+    mockMessages = [messageStart("msg_1")]
+    mockErrorAfter = 1
+    mockStreamError = new UpstreamIdleError(90_000, 90_001)
+
+    const app = createTestApp()
+    const events = await postStream(app)
+
+    const eventTypes = events.map((e) => e.event)
+    expect(eventTypes).toContain("message_start")
+    expect(eventTypes).toContain("message_delta")
+    expect(eventTypes).toContain("message_stop")
+    expect(eventTypes).not.toContain("error")
+    expect(JSON.stringify(events)).not.toContain("upstream_timeout")
   })
 })
