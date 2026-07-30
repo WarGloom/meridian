@@ -2276,36 +2276,37 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           return transcriptLocator(sessionId)
         }
 
-      const validateManagedForkResult = (returnedSessionId: string | undefined): void => {
-        if ((!managedForkTarget || managedForkSuperseded) && resumeSessionId) {
-          if (returnedSessionId === resumeSessionId) return
-          if (returnedSessionId) {
-            unexpectedManagedForkTarget = transcriptLocator(returnedSessionId)
-          }
-          throw new Error(
-            `Resumed SDK session returned ${returnedSessionId || "no session ID"}; expected ${resumeSessionId}`,
-          )
-        }
-        if (!managedForkTarget || managedForkSuperseded) return
-        // The supported fresh-session path does not require the SDK to echo an
-        // ID on every event, but any ID it does echo must agree with the
-        // caller-selected target. Contradiction means the physical transcript
-        // may exist under another identity and must fail closed.
-        if (managedFreshTarget && returnedSessionId === undefined) return
-        if (returnedSessionId !== managedForkTarget.sessionId) {
-          if (returnedSessionId && returnedSessionId !== managedForkSource?.sessionId) {
-            unexpectedManagedForkTarget = {
-              sessionId: returnedSessionId,
-              configDir: managedForkTarget.configDir,
-              ...(managedForkTarget.projectDir ? { projectDir: managedForkTarget.projectDir } : {}),
+        const validateManagedForkResult = (returnedSessionId: string | undefined): void => {
+          if ((!managedForkTarget || managedForkSuperseded) && resumeSessionId) {
+            if (returnedSessionId === resumeSessionId) return
+            if (returnedSessionId) {
+              unexpectedManagedForkTarget = transcriptLocator(returnedSessionId)
             }
+            throw new Error(
+              `Resumed SDK session returned ${returnedSessionId || "no session ID"}; expected ${resumeSessionId}`,
+            )
           }
-          throw new Error(
-            `Managed SDK fork returned ${returnedSessionId || "no session ID"}; expected ${managedForkTarget.sessionId}`,
-          )
+          if (!managedForkTarget || managedForkSuperseded) return
+          // The supported fresh-session path does not require the SDK to echo an
+          // ID on every event, but any ID it does echo must agree with the
+          // caller-selected target. Contradiction means the physical transcript
+          // may exist under another identity and must fail closed.
+          if (managedFreshTarget && returnedSessionId === undefined) return
+          if (returnedSessionId !== managedForkTarget.sessionId) {
+            if (returnedSessionId && returnedSessionId !== managedForkSource?.sessionId) {
+              unexpectedManagedForkTarget = {
+                sessionId: returnedSessionId,
+                configDir: managedForkTarget.configDir,
+                ...(managedForkTarget.projectDir ? { projectDir: managedForkTarget.projectDir } : {}),
+              }
+            }
+            throw new Error(
+              `Managed SDK fork returned ${returnedSessionId || "no session ID"}; expected ${managedForkTarget.sessionId}`,
+            )
+          }
         }
-      }
 
+        const preserveOpenAiSystemPrompt = adapterBase === "openai"
 
         // Resolve thinking against the per-adapter setting.
         //
@@ -2897,8 +2898,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext = pipelineCtx.systemContext ?? systemContext
-
-
+      const clientContextHash = computeLineageHash([{ role: "system", content: systemContext }])
 
       // Adapter-scoped sanitize options (see sanitize.ts).
       const sanitizeOpts: import("./sanitize").SanitizeOptions = {
@@ -3269,6 +3269,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         return textPrompt!
       }
 
+      const skipClientContextOnResume = Boolean(
+        passthrough && resumeSessionId && !isUndo && cachedSession?.clientContextHash === clientContextHash,
+      )
       // SDK setting sources — controls CLAUDE.md and user settings loading.
       const settingSources: import("@anthropic-ai/claude-agent-sdk").SettingSource[] =
         envBool("LOAD_CONTEXT") || sdkFeatures.claudeMd === "full"
@@ -3777,10 +3780,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   if (resumeSessionId) resumedMappingMayBeAdvanced = true
                   const attemptQuery = buildQueryOptions({
                     prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
-                    passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, liftSingleTurnCap: singleTurnCapLifted,
+                    passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, liftSingleTurnCap: singleTurnCapLifted, skipClientContextOnResume,
                     resumeSessionId, isUndo: sdkUndo, resumeSessionAtUuid: undoRollbackUuid ?? passthroughToolCallAssistantUuid, forkSession: busySessionFork || undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                     effort, thinking, taskBudget, outputFormat, betas, settingSources,
                     codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                    clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -3886,6 +3890,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                    clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -3946,6 +3951,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                      clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                       memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -4623,6 +4629,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     managedForkTarget?.sessionId === currentSessionId ? managedForkSource : undefined,
                     mappingExpectedGeneration,
                     options.priorityPublication,
+                    clientContextHash,
                       )
                         if (stored) {
                           mappingExpectedGeneration = stored
@@ -4963,10 +4970,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     if (resumeSessionId) resumedMappingMayBeAdvanced = true
                     const attemptQuery = buildQueryOptions({
                       prompt: makePrompt(), model, workingDirectory, clientWorkingDirectory: promptClientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
-                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, liftSingleTurnCap: singleTurnCapLifted,
+                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv, envOverrides, hasDeferredTools, earlyStop: earlyStopEnabled, liftSingleTurnCap: singleTurnCapLifted, skipClientContextOnResume,
                       resumeSessionId, isUndo: sdkUndo, resumeSessionAtUuid: undoRollbackUuid ?? passthroughToolCallAssistantUuid, forkSession: busySessionFork || undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                    clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -5052,9 +5060,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
-                    memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
-                    webFetchPreflight: sdkFeatures.webFetchPreflight,
-                    claudeAiConnectors: sdkFeatures.claudeAiConnectors,
+                        clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                        memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
+                        webFetchPreflight: sdkFeatures.webFetchPreflight,
+                        claudeAiConnectors: sdkFeatures.claudeAiConnectors,
                         maxBudgetUsd: sdkFeatures.maxBudgetUsd, maxOutputTokens: clientMaxOutputTokens, fallbackModel: sdkFeatures.fallbackModel,
                         sdkDebug: sdkFeatures.sdkDebug,
                         additionalDirectories: sdkFeatures.additionalDirectories
@@ -5108,6 +5117,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         resumeSessionId: undefined, isUndo: false, resumeSessionAtUuid: undefined, forkSessionId: managedForkTarget?.sessionId, sdkHooks, blockedTools: pipelineCtx.blockedTools, incompatibleTools: pipelineCtx.incompatibleTools, mcpServerName: adapter.getMcpServerName(), allowedMcpTools: pipelineCtx.allowedMcpTools, onStderr,
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
+                        clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         webFetchPreflight: sdkFeatures.webFetchPreflight,
                         claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -5837,6 +5847,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     managedForkTarget?.sessionId === currentSessionId ? managedForkSource : undefined,
                     mappingExpectedGeneration,
                     options.priorityPublication,
+                    clientContextHash,
                       )
                       if (stored) {
                         mappingExpectedGeneration = stored
@@ -9581,7 +9592,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
         }
       })()
       return closePromise
-    }
     },
   }
 

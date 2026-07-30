@@ -127,6 +127,9 @@ describe("scratchpad suppression (#627, #1049)", () => {
   it("appends SCRATCHPAD_COUNTER_INSTRUCTION and omits CLAUDE_CODE_SESSION_KIND in passthrough mode (#1049)", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true }))
     expect((result.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBeUndefined()
+    // A resumable passthrough turn must not become a background job either.
+    const resumed = buildQueryOptions(makeContext({ passthrough: true, resumeSessionId: "sdk-session" }))
+    expect((resumed.options.env as Record<string, string>).CLAUDE_CODE_SESSION_KIND).toBeUndefined()
     const prompt = typeof result.options.systemPrompt === "string"
       ? result.options.systemPrompt
       : (result.options.systemPrompt as any)?.append

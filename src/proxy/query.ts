@@ -127,6 +127,8 @@ export interface QueryContext {
   liftSingleTurnCap?: boolean
   /** SDK session ID for resume (if continuing a session) */
   resumeSessionId?: string
+  /** The resumed passthrough session already has this exact client context. */
+  skipClientContextOnResume?: boolean
   /** Whether this is an undo operation */
   isUndo: boolean
   /** Resume at this SDK assistant-message UUID (undo rollback point or
@@ -169,6 +171,8 @@ export interface QueryContext {
   codeSystemPrompt?: boolean
   /** Include the client agent's system prompt */
   clientSystemPrompt?: boolean
+  /** Where to place the client system prompt when the Claude Code preset is disabled. */
+  clientSystemPromptPlacement?: "prompt" | "systemPrompt"
   /** Enable auto-memory (read + write across sessions) */
   memory?: boolean
   /** Enable background memory consolidation (dreaming) */
@@ -203,6 +207,8 @@ export interface BuildQueryResult {
   prompt: QueryContext["prompt"]
   options: Options
 }
+
+const PASSTHROUGH_MAX_TURNS = 30
 
 /**
  * NOTE: agent-specific (passthrough mode).
@@ -469,28 +475,58 @@ export const SCRATCHPAD_COUNTER_INSTRUCTION =
   `or system temporary directory as requested by the user.\n` +
   `</meridian-note>`
 
+function buildClientContext(systemContext: string | undefined, includeClient: boolean): string | undefined {
+  if (!includeClient || !systemContext) return undefined
+  return `<client-system-instructions>\n${systemContext}\n</client-system-instructions>`
+}
+
+function prependClientContextToPrompt(
+  prompt: QueryContext["prompt"],
+  clientContext: string | undefined,
+): QueryContext["prompt"] {
+  if (!clientContext) return prompt
+  if (typeof prompt === "string") {
+    return `${clientContext}\n\n${prompt}`
+  }
+
+  return (async function* () {
+    yield {
+      type: "user" as const,
+      message: { role: "user" as const, content: clientContext },
+      parent_tool_use_id: null,
+    }
+    yield* prompt
+  })()
+}
+
 function resolveSystemPrompt(
-  systemContext: string | undefined,
+  hasClientContext: boolean,
+  clientSystemPromptOption: string | undefined,
   passthrough: boolean,
   settingSources: SettingSource[] | undefined,
   codeSystemPrompt: boolean | undefined,
-  clientSystemPrompt: boolean | undefined,
   cwdNote: string,
 ): { systemPrompt?: string | { type: "preset"; preset: "claude_code"; append?: string } } {
   const hasSettings = settingSources != null && settingSources.length > 0
-  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && !!systemContext))
-  const includeClient = clientSystemPrompt ?? true
-  const clientContext = includeClient ? systemContext : undefined
+  const usePreset = codeSystemPrompt ?? (hasSettings || (!passthrough && hasClientContext))
+  const append = cwdNote || undefined
   const scratchpadNote =
     passthrough && process.env.MERIDIAN_SUPPRESS_SCRATCHPAD !== "0" ? SCRATCHPAD_COUNTER_INSTRUCTION : ""
 
   if (usePreset) {
     // Always non-empty: the gitStatus correction applies to every preset
     // request, whether or not the client sent a system prompt.
-    const append = [clientContext, cwdNote, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, scratchpadNote].filter(Boolean).join("")
-    return { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append } }
+    const presetAppend = [append, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, scratchpadNote]
+      .filter(Boolean)
+      .join("")
+    return { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: presetAppend } }
   }
-  const append = [clientContext, cwdNote].filter(Boolean).join("") || undefined
+  if (clientSystemPromptOption) {
+    const systemPrompt = append
+      ? `${clientSystemPromptOption}\n\n${append}${REPLAY_PROVENANCE_NOTE}${scratchpadNote}`
+      : `${clientSystemPromptOption}${REPLAY_PROVENANCE_NOTE}${scratchpadNote}`
+    return { systemPrompt }
+  }
   if (append) return { systemPrompt: append + REPLAY_PROVENANCE_NOTE + scratchpadNote }
   // Transport provenance is separate from the optional client prompt and
   // Claude Code persona. A plain string keeps an explicitly disabled preset
@@ -505,20 +541,37 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
   const {
     prompt, model, workingDirectory, clientWorkingDirectory, clientEnvironmentMayDifferFromProxy, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv, hasDeferredTools,
-    resumeSessionId, isUndo, resumeSessionAtUuid, forkSession, forkSessionId, sdkHooks, blockedTools, incompatibleTools,
+    resumeSessionId, skipClientContextOnResume, isUndo, resumeSessionAtUuid, forkSession, forkSessionId, sdkHooks, blockedTools, incompatibleTools,
     mcpServerName, allowedMcpTools, onStderr,
-    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt,
-    memory, dreaming, sharedMemory, maxBudgetUsd, maxOutputTokens, fallbackModel, sdkDebug, additionalDirectories,
+    effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt, clientSystemPromptPlacement,
+    memory, dreaming, sharedMemory, maxBudgetUsd, maxOutputTokens, fallbackModel, sdkDebug, additionalDirectories, advisorModel,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory, {
     clientEnvironmentMayDifferFromProxy,
     passthrough,
   })
+  const includeClient = clientSystemPrompt ?? true
+  const useClientSystemPromptOption =
+    clientSystemPromptPlacement === "systemPrompt" &&
+    codeSystemPrompt !== true &&
+    includeClient &&
+    systemContext.trim().length > 0
+  const clientContext = buildClientContext(systemContext, includeClient)
+  // The resumed SDK session already contains the client instructions from its
+  // first turn. Re-injecting them into every continuation appends another full
+  // copy to the conversation, which can consume tens of thousands of tokens
+  // per client-side tool result. Fresh and forked sessions still receive the
+  // current client context.
+  const resumeHasClientContext = Boolean(
+    passthrough && resumeSessionId && !isUndo && skipClientContextOnResume,
+  )
+  const promptClientContext = resumeHasClientContext || useClientSystemPromptOption ? undefined : clientContext
+  const clientSystemPromptOption = resumeHasClientContext || !useClientSystemPromptOption ? undefined : systemContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
   return {
-    prompt,
+    prompt: prependClientContextToPrompt(prompt, promptClientContext),
     options: {
       // Force Node as the executable. The claude-agent-sdk auto-detects Bun
       // via process.versions.bun and defaults to spawning `bun cli.js`.
@@ -548,7 +601,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(stream || passthrough ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...resolveSystemPrompt(systemContext, passthrough, settingSources, codeSystemPrompt, clientSystemPrompt, cwdNote),
+      ...resolveSystemPrompt(clientContext != null, clientSystemPromptOption, passthrough, settingSources, codeSystemPrompt, cwdNote),
       ...(passthrough
         ? {
             // Strip the SDK's ~25k-token built-in tool catalog from the
@@ -581,8 +634,8 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       // gating them on settingSources silently re-enabled auto-memory (the
       // SDK's built-in default) whenever claudeMd was "off".
       settings: {
-        autoMemoryEnabled: ctx.memory ?? true,
-        autoDreamEnabled: ctx.dreaming ?? false,
+        autoMemoryEnabled: memory ?? true,
+        autoDreamEnabled: dreaming ?? false,
         // Always explicit, for the same reason as the memory keys above: an
         // omitted key falls back to the subprocess default, which is to run
         // the check. `webFetchPreflight` is the positive form the settings
@@ -695,7 +748,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
       ...(fallbackModel ? { fallbackModel } : {}),
       ...(sdkDebug ? { debug: true } : {}),
       ...(additionalDirectories && additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-      ...(ctx.advisorModel ? { advisorModel: ctx.advisorModel } : {}),
+      ...(advisorModel ? { advisorModel } : {}),
     }
   }
 }
