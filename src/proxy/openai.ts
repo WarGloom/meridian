@@ -19,6 +19,8 @@
  * any keyed client. An unkeyed request keeps the packing above.
  */
 
+import { is1mContextSupportEnabled } from "./models"
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1197,6 +1199,8 @@ const FULL_CAPABILITIES: ModelCapabilities = Object.freeze({
  *   window at 200k, including models whose ordinary window is natively 1M.
  */
 export function buildModelList(extendedContextIncluded: boolean, now = Math.floor(Date.now() / 1000), disable1mContext = false): OpenAiModel[] {
+  // The global MERIDIAN_1M_CONTEXT_SUPPORT opt-out applies on top of the per-profile SDK switch.
+  disable1mContext ||= !is1mContextSupportEnabled()
   extendedContextIncluded = extendedContextIncluded && !disable1mContext
   return [
     {
