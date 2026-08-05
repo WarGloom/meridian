@@ -80,15 +80,25 @@ describe("buildQueryOptions — gitStatus note placement", () => {
     expect(append).toContain(GIT_STATUS_PROVENANCE_NOTE.trim())
   })
 
-  it("appends the note when the client also sent a system prompt", () => {
-    const append = presetAppend({ codeSystemPrompt: true, systemContext: "You are helpful." })
-    expect(append).toContain("You are helpful.")
+  it("keeps the note in the preset append when the client also sent a system prompt", () => {
+    const result = buildQueryOptions(ctx({ codeSystemPrompt: true, systemContext: "You are helpful." }))
+    const sp = result.options.systemPrompt
+    if (typeof sp !== "object" || sp === null) {
+      throw new Error(`expected preset object, got ${JSON.stringify(sp)}`)
+    }
+    const append = (sp as { append?: string }).append ?? ""
+
+    // Large SDK systemPrompt values can be rejected by the subscription
+    // transport, so client instructions travel in the prompt. The preset
+    // append is reserved for Meridian's own correction.
+    expect(append).not.toContain("You are helpful.")
     expect(append).toContain(GIT_STATUS_PROVENANCE_NOTE.trim())
+    expect(result.prompt).toContain("<client-system-instructions>\nYou are helpful.")
   })
 
-  it("keeps the client's system prompt first so the note reads as an addendum", () => {
+  it("keeps the preset addendum independent of the client system prompt", () => {
     const append = presetAppend({ codeSystemPrompt: true, systemContext: "You are helpful." })
-    expect(append.indexOf("You are helpful.")).toBeLessThan(append.indexOf("<meridian-note>"))
+    expect(append).toBe(GIT_STATUS_PROVENANCE_NOTE)
   })
 
   it("keeps the note after the cwd override, which must stay the first env block", () => {
@@ -106,11 +116,14 @@ describe("buildQueryOptions — gitStatus note placement", () => {
   it("omits the note when the preset is not used", () => {
     // Without the preset there is no gitStatus block, so the note would be
     // describing context the model cannot see.
-    const { options } = buildQueryOptions(ctx({
+    const result = buildQueryOptions(ctx({
       codeSystemPrompt: false,
       systemContext: "You are helpful.",
     }))
-    expect(options.systemPrompt).toBe("You are helpful.")
+    // Keep the SDK's systemPrompt explicitly empty so it cannot restore the
+    // preset; the client context remains in the request prompt.
+    expect(result.options.systemPrompt).toBe("")
+    expect(result.prompt).toContain("<client-system-instructions>\nYou are helpful.")
   })
 
   it("still forces an empty system prompt when the preset is off with nothing to append", () => {
