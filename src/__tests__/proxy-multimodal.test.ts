@@ -285,7 +285,7 @@ describe("Multimodal content", () => {
     }
   })
 
-  it("should pass system context via systemPrompt option, not in structured messages", async () => {
+  it("should keep client system context in the prompt when the SDK preset is used", async () => {
     const app = createTestApp()
     await (await post(app, {
       model: "claude-sonnet-4-5",
@@ -301,22 +301,22 @@ describe("Multimodal content", () => {
       }],
     })).json()
 
-    // System context should be in SDK option, not injected as a structured message
+    // Keep the SDK preset small: client instructions travel in the prompt while
+    // the preset append is reserved for Meridian's own gitStatus correction.
     expect(capturedQueryParams.options.systemPrompt.type).toBe("preset")
     expect(capturedQueryParams.options.systemPrompt.preset).toBe("claude_code")
-    // Leads with the client's prompt; Meridian's gitStatus note (#694) follows.
-    expect(capturedQueryParams.options.systemPrompt.append).toStartWith("You are a helpful assistant.")
+    expect(capturedQueryParams.options.systemPrompt.append).toContain("<meridian-note>")
+    expect(capturedQueryParams.options.systemPrompt.append).not.toContain("You are a helpful assistant.")
 
     const messages: any[] = []
     for await (const msg of capturedQueryParams.prompt) {
       messages.push(msg)
     }
 
-    // No message should contain the system context (it's in the SDK option now)
-    const hasSystemMsg = messages.some((m: any) =>
-      typeof m.message.content === "string" && m.message.content.includes("You are a helpful assistant.")
+    const clientContext = messages.find((m: any) =>
+      typeof m.message.content === "string" && m.message.content.includes("<client-system-instructions>")
     )
-    expect(hasSystemMsg).toBe(false)
+    expect(clientContext?.message.content).toContain("You are a helpful assistant.")
   })
 
   it("should fall back to text prompt with image placeholder when no multimodal", async () => {
