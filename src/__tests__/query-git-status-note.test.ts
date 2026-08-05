@@ -9,7 +9,12 @@
  * reports having destroyed the user's uncommitted changes (#694).
  */
 import { describe, it, expect } from "bun:test"
-import { buildQueryOptions, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, type QueryContext } from "../proxy/query"
+import {
+  buildQueryOptions,
+  GIT_STATUS_PROVENANCE_NOTE,
+  REPLAY_PROVENANCE_NOTE,
+  type QueryContext,
+} from "../proxy/query"
 import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS } from "../proxy/tools"
 
 /** Mirrors the shared context helper in query.test.ts. */
@@ -80,15 +85,25 @@ describe("buildQueryOptions — gitStatus note placement", () => {
     expect(append).toContain(GIT_STATUS_PROVENANCE_NOTE.trim())
   })
 
-  it("appends the note when the client also sent a system prompt", () => {
-    const append = presetAppend({ codeSystemPrompt: true, systemContext: "You are helpful." })
-    expect(append).toContain("You are helpful.")
+  it("keeps the note in the preset append when the client also sent a system prompt", () => {
+    const result = buildQueryOptions(ctx({ codeSystemPrompt: true, systemContext: "You are helpful." }))
+    const sp = result.options.systemPrompt
+    if (typeof sp !== "object" || sp === null) {
+      throw new Error(`expected preset object, got ${JSON.stringify(sp)}`)
+    }
+    const append = (sp as { append?: string }).append ?? ""
+
+    // Large SDK systemPrompt values can be rejected by the subscription
+    // transport, so client instructions travel in the prompt. The preset
+    // append is reserved for Meridian's own correction.
+    expect(append).not.toContain("You are helpful.")
     expect(append).toContain(GIT_STATUS_PROVENANCE_NOTE.trim())
+    expect(result.prompt).toContain("<client-system-instructions>\nYou are helpful.")
   })
 
-  it("keeps the client's system prompt first so the note reads as an addendum", () => {
+  it("keeps the preset addendum independent of the client system prompt", () => {
     const append = presetAppend({ codeSystemPrompt: true, systemContext: "You are helpful." })
-    expect(append.indexOf("You are helpful.")).toBeLessThan(append.indexOf("<meridian-note>"))
+    expect(append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
   })
 
   it("keeps the note after the cwd override, which must stay the first env block", () => {
@@ -106,11 +121,15 @@ describe("buildQueryOptions — gitStatus note placement", () => {
   it("omits the note when the preset is not used", () => {
     // Without the preset there is no gitStatus block, so the note would be
     // describing context the model cannot see.
-    const { options } = buildQueryOptions(ctx({
+    const result = buildQueryOptions(ctx({
       codeSystemPrompt: false,
       systemContext: "You are helpful.",
     }))
-    expect(options.systemPrompt).toBe("You are helpful." + REPLAY_PROVENANCE_NOTE)
+    // Keep the SDK's systemPrompt explicitly free of the preset; the client
+    // context remains in the request prompt while replay provenance remains
+    // available as transport context.
+    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(result.prompt).toContain("<client-system-instructions>\nYou are helpful.")
   })
 
   it("keeps the preset off while retaining transport provenance", () => {
