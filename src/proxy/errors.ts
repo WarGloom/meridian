@@ -145,16 +145,10 @@ export function classifyError(errMsg: string, model?: string): ClassifiedError {
 
   // Rate limiting. All quota exhaustion must classify as rate_limit_error
   // (429), not generic api_error: clients back off correctly and priority
-  // routing's failover keys off this class. Misclassifying costs a 500 and a
-  // profile that never fails over.
+  // routing's failover keys off this class.
   //
-  // The CLI's phrasing is a moving target — "You've hit your session limit ·
-  // resets <time>", the shorter "You've hit your limit", and "You've hit your
-  // weekly limit" have all been observed live, each arriving as its own bug
-  // report after the previous literal stopped matching (#764, #787). Match the
-  // shape instead of enumerating: "hit your <anything> limit" covers the
-  // variants seen so far and the daily/monthly/5-hour ones that would
-  // otherwise be the next report.
+  // Match the CLI's observed "hit your [qualifier] limit" variants, including
+  // session, weekly, daily, monthly, and future limit wordings.
   if (HTTP_429.test(lower) || lower.includes("rate limit") || lower.includes("too many requests")
     || HIT_YOUR_LIMIT.test(lower) || HIT_YOUR_SPEND_LIMIT.test(lower)
     || lower.includes("usage limit reached")

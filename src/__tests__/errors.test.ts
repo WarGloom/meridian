@@ -619,7 +619,6 @@ describe("classifyError: session/usage limit phrasings (live-observed)", () => {
     expect(r.type).toBe("rate_limit_error")
     expect(r.status).toBe(429)
   })
-
   it("maps the CLI's 'You've hit your weekly limit' to rate_limit_error", () => {
     const r = classifyError("Claude Code returned an error result: You've hit your weekly limit \u00b7 resets 2pm (Asia/Jerusalem)")
     expect(r.type).toBe("rate_limit_error")
@@ -732,7 +731,6 @@ describe("classifyError: session/usage limit phrasings (live-observed)", () => {
     const r = classifyError("Claude Code returned an error result: you have hit your configured tool call depth limit")
     expect(r.type).not.toBe("rate_limit_error")
   })
-
   it("maps 'usage limit reached' to rate_limit_error", () => {
     const r = classifyError("usage limit reached | resets at 5pm")
     expect(r.type).toBe("rate_limit_error")
