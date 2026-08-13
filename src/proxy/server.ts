@@ -2030,7 +2030,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
         }
 
-        const preserveOpenAiSystemPrompt = adapterBase === "openai"
+        const preserveOpenAiSystemPrompt = adapterBase === "openai" || adapterBase === "jcode"
 
         // Resolve thinking against the per-adapter setting.
         //
@@ -3232,6 +3232,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     effort, thinking, taskBudget, outputFormat, betas, settingSources,
                     codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                    repeatClientSystemPromptOnResume: adapterBase === "jcode",
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -3336,6 +3337,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                    repeatClientSystemPromptOnResume: adapterBase === "jcode",
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -3397,6 +3399,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                       clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                      repeatClientSystemPromptOnResume: adapterBase === "jcode",
                       memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -4287,6 +4290,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       effort, thinking, taskBudget, outputFormat, betas, settingSources,
                       codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                     clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                    repeatClientSystemPromptOnResume: adapterBase === "jcode",
                     memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                     webFetchPreflight: sdkFeatures.webFetchPreflight,
                     claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -4370,6 +4374,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                         clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                        repeatClientSystemPromptOnResume: adapterBase === "jcode",
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         webFetchPreflight: sdkFeatures.webFetchPreflight,
                         claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -4427,6 +4432,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         effort, thinking, taskBudget, outputFormat, betas, settingSources,
                         codeSystemPrompt: sdkFeatures.codeSystemPrompt, clientSystemPrompt: sdkFeatures.clientSystemPrompt === false ? false : undefined,
                         clientSystemPromptPlacement: preserveOpenAiSystemPrompt ? "systemPrompt" : undefined,
+                        repeatClientSystemPromptOnResume: adapterBase === "jcode",
                         memory: sdkFeatures.memory, dreaming: sdkFeatures.dreaming, sharedMemory: sdkFeatures.sharedMemory,
                         webFetchPreflight: sdkFeatures.webFetchPreflight,
                         claudeAiConnectors: sdkFeatures.claudeAiConnectors,
@@ -6181,10 +6187,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // incompleteness existed in the SSE, one frame too late to be
                 // seen. Ordering it first is what makes the failure reach the
                 // client at all.
-                safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-                  type: "error",
-                  error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
-                })}\n\n`), "error_event_before_stop")
+                if (!(error instanceof UpstreamIdleError)) {
+                  safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+                    type: "error",
+                    error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
+                  })}\n\n`), "error_event_before_stop")
+                }
                 safeEnqueue(encoder.encode(
                   `event: message_stop\ndata: {"type":"message_stop"}\n\n`
                 ), "error_message_stop")

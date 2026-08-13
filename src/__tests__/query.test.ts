@@ -270,6 +270,19 @@ describe("buildQueryOptions", () => {
     expect(result.prompt).not.toContain("<client-system-instructions>")
   })
 
+  it("repeats systemPrompt-placed client context on resume when requested", () => {
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      resumeSessionId: "sdk-123",
+      skipClientContextOnResume: true,
+      systemContext: "Agent instructions",
+      clientSystemPromptPlacement: "systemPrompt",
+      repeatClientSystemPromptOnResume: true,
+    }))
+    expect((result.options as any).systemPrompt).toBe("Agent instructions")
+    expect(result.prompt).not.toContain("<client-system-instructions>")
+  })
+
   it("omits resume when not provided", () => {
     const result = buildQueryOptions(makeContext())
     expect((result.options as any).resume).toBeUndefined()
