@@ -8759,11 +8759,15 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 // incompleteness existed in the SSE, one frame too late to be
                 // seen. Ordering it first is what makes the failure reach the
                 // client at all.
-                safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-                  type: "error",
-                  error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
-                })}\n\n`), "error_event_before_stop")
-                sendTerminalStop("error_message_stop")
+                if (!(error instanceof UpstreamIdleError)) {
+                  safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+                    type: "error",
+                    error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
+                  })}\n\n`), "error_event_before_stop")
+                }
+                safeEnqueue(encoder.encode(
+                  `event: message_stop\ndata: {"type":"message_stop"}\n\n`
+                ), "error_message_stop")
               } else {
                 // No message_start was ever emitted, so there is no message to
                 // close — the error event is the whole response.
