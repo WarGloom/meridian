@@ -130,6 +130,8 @@ export interface QueryContext {
   clientSystemPrompt?: boolean
   /** Where to place the client system prompt when the Claude Code preset is disabled. */
   clientSystemPromptPlacement?: "prompt" | "systemPrompt"
+  /** Re-send a systemPrompt-placed client prompt when resuming an SDK session. */
+  repeatClientSystemPromptOnResume?: boolean
   /** Enable auto-memory (read + write across sessions) */
   memory?: boolean
   /** Enable background memory consolidation (dreaming) */
@@ -305,7 +307,7 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
     resumeSessionId, skipClientContextOnResume, isUndo, resumeSessionAtUuid, forkSession, sdkHooks, blockedTools, incompatibleTools,
     mcpServerName, allowedMcpTools, onStderr,
     effort, thinking, taskBudget, outputFormat, betas, settingSources, codeSystemPrompt, clientSystemPrompt, clientSystemPromptPlacement,
-    memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories, advisorModel,
+    repeatClientSystemPromptOnResume, memory, dreaming, sharedMemory, maxBudgetUsd, fallbackModel, sdkDebug, additionalDirectories, advisorModel,
   } = ctx
   const cwdNote = buildCwdNote(workingDirectory, clientWorkingDirectory)
   const includeClient = clientSystemPrompt ?? true
@@ -324,7 +326,9 @@ export function buildQueryOptions(ctx: QueryContext, abortController?: AbortCont
     passthrough && resumeSessionId && !isUndo && skipClientContextOnResume,
   )
   const promptClientContext = resumeHasClientContext || useClientSystemPromptOption ? undefined : clientContext
-  const clientSystemPromptOption = resumeHasClientContext || !useClientSystemPromptOption ? undefined : systemContext
+  const clientSystemPromptOption =
+    (resumeHasClientContext && !repeatClientSystemPromptOnResume) || !useClientSystemPromptOption
+      ? undefined : systemContext
 
   const allBlockedTools = [...blockedTools, ...incompatibleTools]
 
