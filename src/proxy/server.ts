@@ -7,6 +7,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { rateLimitStore } from "./rateLimitStore"
+import { PriorityPromotionLockQueue, holdPromotionLock } from "./priorityFailback"
 import { guardUpstreamIdle, UpstreamIdleError } from "./streamIdleGuard"
 import { linkRequestAbort } from "./requestAbort"
 import { AbortableSemaphore, getProcessSdkSemaphore, type SemaphoreLease } from "./concurrency"
@@ -81,7 +82,17 @@ import { getAdapterTransforms } from "./transforms/registry"
 import { loadPlugins, getActiveTransforms } from "./plugins/loader"
 import type { LoadedPlugin } from "./plugins/types"
 import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile, type ResolvedProfile } from "./profiles"
-import { getRoutingMode, resolvePriorityOrder, choosePriorityProfile, ProfileExhaustion, AssignmentStore, resolveCooldownUntil } from "./routing"
+import {
+  getRoutingMode,
+  getPriorityFailbackPolicy,
+  shouldPromotePriorityAssignment,
+  resolvePriorityOrder,
+  choosePriorityProfile,
+  ProfileExhaustion,
+  AssignmentStore,
+  resolveCooldownUntil,
+  type PriorityAssignment,
+} from "./routing"
 import { getSetting, setSetting } from "./settings"
 import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
@@ -166,6 +177,7 @@ interface RequestMeta {
 interface HandleMessagesOptions {
   body: any
   forcedProfileId?: string
+  freshSession?: boolean
 }
 
 function totalQueueWaitMs(meta: RequestMeta): number {
@@ -469,6 +481,18 @@ function checkTokenHealth(
   }
 }
 
+type PriorityDispatchOptions = {
+  readonly context: Context
+  readonly body: any
+  readonly requestMeta: RequestMeta
+  readonly candidateIds: readonly string[]
+  readonly sessionKey: string | null
+  readonly wantsStream: boolean
+  readonly freshCandidateId: string | null
+  readonly assignmentRequestId: string | undefined
+  readonly expectedAssignment: PriorityAssignment | undefined
+}
+
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
   const finalConfig = { ...DEFAULT_PROXY_CONFIG, ...config }
   proxyLogSilent = finalConfig.silent
@@ -667,6 +691,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   const priorityAssignments = new AssignmentStore(PRIORITY_ASSIGNMENTS_MAX)
   // The per-window reset cap lives in routing.ts (cooldownCapMs): a single
   // constant here is what let a 6-hour bound flatten a weekly reset (#790).
+  const priorityPromotionLocks = new PriorityPromotionLockQueue()
   const PRIORITY_DEFAULT_COOLDOWN_MS = 10 * 60_000
 
   function priorityProfileOrderSetting(): string[] | undefined {
@@ -841,18 +866,27 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     return { failed: false, errorPayload: null, errorType: null, response }
   }
 
-  async function dispatchPriority(c: Context, body: any, requestMeta: RequestMeta, orderedCandidateIds: string[], sessionKey: string | null, wantsStream: boolean): Promise<Response> {
+  async function dispatchPriority(options: PriorityDispatchOptions): Promise<Response> {
     let lastError: unknown = null
     let lastStatus = 429
     let previous: string | null = null
     let previousReason = "rate_limit_error"
-    for (const [attempt, candidate] of orderedCandidateIds.entries()) {
-      const inner = await handleMessages(c, forkAttemptMeta(requestMeta, attempt), { body, forcedProfileId: candidate })
+    for (const [attempt, candidate] of options.candidateIds.entries()) {
+      const inner = await handleMessages(options.context, forkAttemptMeta(options.requestMeta, attempt), {
+        body: options.body,
+        forcedProfileId: candidate,
+        freshSession: candidate === options.freshCandidateId,
+      })
       const sniffed = await sniffAccountFailure(inner)
       if (!sniffed.failed) {
-        if (sessionKey) priorityAssignments.set(sessionKey, candidate)
+        if (options.sessionKey) {
+          priorityAssignments.compareAndSet(options.sessionKey, options.expectedAssignment, {
+            profileId: candidate,
+            requestId: options.assignmentRequestId,
+          })
+        }
         if (previous) {
-          claudeLog("profile.failover", { from: previous, to: candidate, reason: previousReason, sessionKey })
+          claudeLog("profile.failover", { from: previous, to: candidate, reason: previousReason, sessionKey: options.sessionKey })
           plog(`[PROXY] PRIORITY failover ${previous} -> ${candidate} (${previousReason})`)
         }
         return sniffed.response
@@ -883,7 +917,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     // exact frame for SSE requests; non-stream errors pass through as JSON,
     // carrying the status that came with them — a pool refused for billing
     // must not reach the client as a 429 it would dutifully back off from.
-    if (wantsStream) {
+    if (options.wantsStream) {
       return new Response(`event: error\ndata: ${JSON.stringify(lastError)}\n\n`, {
         status: 200,
         headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" },
@@ -989,24 +1023,101 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             // shared value.
             const assignmentCwd = adapter.extractClientWorkingDirectory?.(body)
               ?? adapter.extractWorkingDirectory(body)
+            const adapterSessionId = adapter.getSessionId(c, body)
             const sessionKey = getPriorityAssignmentKey(
-              adapter.getSessionId(c, body),
+              adapterSessionId,
               body.messages,
               assignmentCwd,
             )
-            const assigned = sessionKey ? priorityAssignments.get(sessionKey) : undefined
-            // Assignment affinity: an existing conversation stays on its
-            // account while that account is healthy (protects warm prompt
-            // caches). Only NEW sessions drain back after a reset.
-            let first: string
-            if (assigned && order.includes(assigned) && !priorityExhaustion.isExhausted(assigned)) {
-              first = assigned
-            } else {
-              const pick = choosePriorityProfile(order, id => priorityExhaustion.isExhausted(id))
-              first = pick?.id ?? order[0]!
+            const preferred = order[0]
+            if (preferred !== undefined) {
+              const failbackPolicy = getPriorityFailbackPolicy(
+                process.env.MERIDIAN_PRIORITY_FAILBACK ?? getSetting("priorityFailback"),
+              )
+              // NOTE: agent-specific (OpenCode) — these headers identify human turn boundaries.
+              const acceptsOpenCodeTurnHeaders = (adapter.baseName ?? adapter.name) === "opencode"
+                && adapterSessionId !== undefined
+              const requestId = acceptsOpenCodeTurnHeaders ? c.req.header("x-opencode-request") : undefined
+              const requestKind = acceptsOpenCodeTurnHeaders ? c.req.header("x-opencode-request-kind") : undefined
+              const shouldPromote = (assignment: PriorityAssignment | undefined): boolean => {
+                if (assignment === undefined) return false
+                return assignment.profileId !== preferred
+                  && order.includes(assignment.profileId)
+                  && !priorityExhaustion.isExhausted(assignment.profileId)
+                  && !priorityExhaustion.isExhausted(preferred)
+                  && shouldPromotePriorityAssignment({
+                    policy: failbackPolicy,
+                    assignment,
+                    requestId,
+                    requestKind,
+                  })
+              }
+              let assignment = sessionKey ? priorityAssignments.get(sessionKey) : undefined
+              let releasePromotionLock: (() => void) | undefined
+              let streamOwnsPromotionLock = false
+              if (sessionKey !== null && shouldPromote(assignment)) {
+                try {
+                  releasePromotionLock = await priorityPromotionLocks.acquire(sessionKey, c.req.raw.signal)
+                } catch (error) {
+                  if (requestAbort.controller.signal.aborted) {
+                    return new Response(null, { status: 499, statusText: "Client Closed Request" })
+                  }
+                  throw error
+                }
+                assignment = priorityAssignments.get(sessionKey)
+              }
+              try {
+                const promoting = shouldPromote(assignment)
+                const assignedProfile = assignment?.profileId
+                const assignmentIsHealthy = assignedProfile !== undefined
+                  && order.includes(assignedProfile)
+                  && !priorityExhaustion.isExhausted(assignedProfile)
+                const pick = choosePriorityProfile(order, id => priorityExhaustion.isExhausted(id))
+                const first = promoting
+                  ? preferred
+                  : assignmentIsHealthy
+                    ? assignedProfile
+                    : pick?.id ?? preferred
+                const candidates = [first, ...order.filter(id => id !== first && !priorityExhaustion.isExhausted(id))]
+                const assignmentRequestId = requestKind === "human" && requestId !== undefined
+                  ? requestId
+                  : assignment?.requestId
+                const response = await dispatchPriority({
+                  context: c,
+                  body,
+                  requestMeta,
+                  candidateIds: candidates,
+                  sessionKey,
+                  wantsStream: body.stream === true,
+                  freshCandidateId: promoting ? preferred : null,
+                  assignmentRequestId,
+                  expectedAssignment: assignment,
+                })
+                if (promoting && body.stream === true && releasePromotionLock !== undefined) {
+                  const completion = responseCompletions.get(response)
+                  const releaseAfterCompletion = completion === undefined
+                    ? releasePromotionLock
+                    : () => { void completion.then(releasePromotionLock, releasePromotionLock) }
+                  if (completion !== undefined) {
+                    const releaseOnRequestAbort = () => releasePromotionLock?.()
+                    if (c.req.raw.signal.aborted) {
+                      releaseOnRequestAbort()
+                    } else {
+                      c.req.raw.signal.addEventListener("abort", releaseOnRequestAbort, { once: true })
+                      const detachAbort = () => c.req.raw.signal.removeEventListener("abort", releaseOnRequestAbort)
+                      void completion.then(detachAbort, detachAbort)
+                    }
+                  }
+                  const lockedResponse = holdPromotionLock(response, c.req.raw.signal, releaseAfterCompletion)
+                  if (completion) responseCompletions.set(lockedResponse, completion)
+                  streamOwnsPromotionLock = true
+                  return lockedResponse
+                }
+                return response
+              } finally {
+                if (!streamOwnsPromotionLock) releasePromotionLock?.()
+              }
             }
-            const candidates = [first, ...order.filter(id => id !== first && !priorityExhaustion.isExhausted(id))]
-            return dispatchPriority(c, body, requestMeta, candidates, sessionKey, body.stream === true)
           }
         }
         const profile = resolveProfile(
@@ -1304,6 +1415,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const isIndependentSession =
           (!agentSessionId && (requestSource?.startsWith("fork-") || isSubagentRequest)) ||
           isClientDrivenLoop || false
+        if (options.freshSession === true) {
+          evictSession(profileSessionId, profileScopedCwd, body.messages || [])
+        }
         let lineageResult: LineageResult = isIndependentSession
           ? { type: "diverged", reason: "independent-request" }
           : lookupSession(profileSessionId, body.messages || [], profileScopedCwd)
@@ -4510,7 +4624,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       if (Array.isArray(body?.messages)) {
         const adapter = detectAdapter(c)
         const agentSessionId = adapter.getSessionId(c, body)
-        if (agentSessionId) {
+        const usesPriorityDispatcher = getRoutingMode(process.env.MERIDIAN_ROUTING ?? getSetting("routing")) === "priority"
+          && !c.req.header("x-meridian-profile")
+          && getEffectiveProfiles(finalConfig.profiles).length > 1
+        // Priority assignments already coordinate the logical session through
+        // promotion locks and compare-and-set. Taking the generic turn lease as
+        // well would prevent those owners from observing concurrent requests.
+        if (agentSessionId && !usesPriorityDispatcher) {
           try {
             sessionTurnLease = await processSessionTurns.acquire(
               `session:${agentSessionId}`,
@@ -5716,7 +5836,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
         }
       })()
       return closePromise
-    }
     },
   }
 }
