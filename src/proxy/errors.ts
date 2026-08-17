@@ -97,7 +97,8 @@ export function classifyError(errMsg: string, model?: string): ClassifiedError {
   // Match the CLI's observed "hit your [qualifier] limit" variants, including
   // session, weekly, daily, monthly, and future limit wordings.
   if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")
-    || HIT_YOUR_LIMIT.test(lower) || lower.includes("usage limit reached")) {
+    || HIT_YOUR_LIMIT.test(lower) || lower.includes("usage limit reached")
+    || lower.includes("out of usage credits")) {
     const hint = lower.includes("1m") || lower.includes("context")
       ? extendedContextHint(model)
       : ""
