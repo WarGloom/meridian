@@ -303,13 +303,52 @@ describe("session transcript lifecycle", () => {
     expect(readSidecar(storeDir).resources[getTranscriptResourceKey(failed)]).toBeUndefined()
   })
 
-  it("promotes a pinned prepared intent after crash recovery", async () => {
+  it("keeps a locally pinned prepared intent prepared across foreign reconciliation", async () => {
     const current = locator("prepared-current")
-    const key = getTranscriptResourceKey(await prepareFork(current, options))
+    const graceOptions = { ...options, preparedGraceMs: 100 }
+    const ownerScope = { ...graceOptions, pinProvider: () => [current] }
+    const foreignScope = { ...graceOptions, pinProvider: () => [] }
+    const key = getTranscriptResourceKey(await prepareFork(current, graceOptions))
+    const initialUpdatedAt = readSidecar(storeDir).resources[key]?.updatedAt
+    now += 100
 
-    await reconcile([current], options)
+    await reconcile([], ownerScope)
+    await reconcile([], foreignScope)
+
+    expect(readSidecar(storeDir).resources[key]).toMatchObject({
+      state: "prepared",
+      updatedAt: now,
+    })
+    expect(readSidecar(storeDir).resources[key]?.updatedAt).toBeGreaterThan(initialUpdatedAt ?? 0)
+
+    await commitFork(current, graceOptions)
 
     expect(readSidecar(storeDir).resources[key]?.state).toBe("live")
+  })
+
+  it("rescues a pinned retired intent after crash reclamation and releases one pending slot", async () => {
+    const bounded = { ...options, preparedGraceMs: 100, maxPending: 1 }
+    const recovered = locator("retired-crash-recovery")
+    const firstUnpinned = locator("first-unpinned-live")
+    const secondUnpinned = locator("second-unpinned-live")
+    const recoveredKey = getTranscriptResourceKey(await prepareFork(recovered, bounded))
+    await registerLiveTranscript(firstUnpinned, bounded)
+    await registerLiveTranscript(secondUnpinned, bounded)
+    now += 100
+    const foreignScope = { ...bounded, pinProvider: () => [] }
+    const ownerScope = { ...bounded, pinProvider: () => [recovered] }
+
+    expect((await reconcile([], foreignScope)).preparedRetired).toBe(1)
+    const rescued = await reconcile([], ownerScope)
+
+    expect(rescued.resourcesPinned).toBe(1)
+    expect(rescued.liveRetired).toBe(1)
+    const resources = readSidecar(storeDir).resources
+    expect(resources[recoveredKey]?.state).toBe("live")
+    expect([
+      resources[getTranscriptResourceKey(firstUnpinned)]?.state,
+      resources[getTranscriptResourceKey(secondUnpinned)]?.state,
+    ].sort()).toEqual(["live", "retired"])
   })
 
   it("blocks cross-process deletion while a durable writer lease is active", async () => {
