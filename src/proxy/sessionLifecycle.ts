@@ -726,7 +726,10 @@ async function reconcileUnderLock(
       if (resource.state === "deleted") {
         throw new SessionLifecycleError(`pinned transcript ${resource.key} was already deleted`)
       }
-      if (resource.state === "prepared" || resource.state === "retired") {
+      if (resource.state === "prepared") {
+        resource.updatedAt = now
+        changed = true
+      } else if (resource.state === "retired") {
         resource.state = "live"
         resource.updatedAt = now
         delete resource.nextAttemptAt
