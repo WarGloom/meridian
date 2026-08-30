@@ -63,12 +63,12 @@ describe("findOpencodeConfigPath", () => {
     expect(findOpencodeConfigPath()).toContain("/xdg/config")
   })
 
-  it("falls back to ~/.config/opencode/opencode.json", () => {
+  it("falls back to the user OpenCode config", () => {
     delete process.env.OPENCODE_CONFIG_DIR
     delete process.env.XDG_CONFIG_HOME
     const path = findOpencodeConfigPath()
-    expect(path).toContain("opencode")
-    expect(path).toEndWith("opencode.json")
+    expect(path).toContain("/.config/opencode/")
+    expect(path).toMatch(/opencode\.jsonc?$/)
   })
 })
 

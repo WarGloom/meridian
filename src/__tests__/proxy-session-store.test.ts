@@ -100,6 +100,10 @@ describe("Shared session store", () => {
       { input_tokens: 9, output_tokens: 4 },
       [["block-hash-a", "block-hash-b"]],
       undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       "client-context-hash",
     )
 

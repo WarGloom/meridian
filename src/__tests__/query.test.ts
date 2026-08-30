@@ -163,7 +163,7 @@ describe("buildQueryOptions", () => {
     }
   })
 
-  it("keeps maxTurns at 4 with deferred tools — ToolSearch discovery is a real round-trip, so the cap must not apply (#547)", () => {
+  it("uses the fixed passthrough ceiling with deferred tools", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, hasDeferredTools: true }))
     expect(result.options.maxTurns).toBe(30)
   })
@@ -176,7 +176,7 @@ describe("buildQueryOptions", () => {
     }))
     expect(result.options.maxTurns).toBe(30)
   })
-  it("keeps maxTurns at 6 with advisor — the advisor executes call/result/answer, so the cap must not apply", () => {
+  it("uses the fixed passthrough ceiling with advisor", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, advisorModel: "claude-opus-4-7" }))
     expect(result.options.maxTurns).toBe(30)
   })

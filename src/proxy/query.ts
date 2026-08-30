@@ -257,16 +257,18 @@ function computePassthroughMaxTurns(
   // calls — which the SDK surfaces one assistant turn each — can need more
   // headroom, and orchestration clients hit it on deep chains (#494). Allow
   // MERIDIAN_PASSTHROUGH_MAX_TURNS / CLAUDE_PROXY_PASSTHROUGH_MAX_TURNS to
-  // raise (or lower) the base (incl. the deferred bump); the advisor bump
-  // below is added on top and is unaffected by the override.
+  // override the automatic budget when an operator needs an exact ceiling.
   const configured = envInt("PASSTHROUGH_MAX_TURNS", defaultBase)
   // An operator who pinned a budget gets it verbatim — the cap must not
   // silently override a value someone set to work around a client quirk.
   const operatorPinned = env("PASSTHROUGH_MAX_TURNS") !== undefined && configured > 0
-  const advisorBump = advisorModel ? 3 : 0
-  if (singleTurnHandoff && !operatorPinned) return 1
-  const base = configured > 0 ? configured : defaultBase
-  return base + advisorBump
+  if (operatorPinned) return configured
+  if (singleTurnHandoff) return 1
+  // Deferred ToolSearch and advisor calls have variable internal turn counts.
+  // Give those flows the fixed safety ceiling; output-format-only flows retain
+  // the small deterministic budget above.
+  if (hasDeferredTools || advisorModel) return PASSTHROUGH_MAX_TURNS
+  return configured > 0 ? configured : defaultBase
 }
 
 /**
