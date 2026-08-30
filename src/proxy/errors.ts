@@ -316,6 +316,14 @@ export function classifyResumeRefusal(error: unknown, stderr?: string): ResumeRe
   return undefined
 }
 
+const SYNTHETIC_API_400 = /\bAPI Error:\s*400\b/i
+
+export function isToolUseConcurrencyResumeError(error: unknown, resumeSessionId?: string): boolean {
+  if (!resumeSessionId || !(error instanceof Error)) return false
+  return SYNTHETIC_API_400.test(error.message)
+    && error.message.toLowerCase().includes("tool use concurrency")
+}
+
 /**
  * Detect the CLI's bg-agent resume refusal (#630). With
  * CLAUDE_CODE_SESSION_KIND=bg (#628 scratchpad suppression) every SDK

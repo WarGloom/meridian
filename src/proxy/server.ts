@@ -54,7 +54,7 @@ import { LRUMap } from "../utils/lruMap"
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { canRecoverCapturedToolUses, classifyError, extractSdkTermination, formatSdkTermination, classifyResumeRefusal, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError, isAccountFailoverError, isQuotaRefusal } from "./errors"
+import { canRecoverCapturedToolUses, classifyError, extractSdkTermination, formatSdkTermination, classifyResumeRefusal, isToolUseConcurrencyResumeError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError, isAccountFailoverError, isQuotaRefusal } from "./errors"
 import { refreshOAuthToken, ensureFreshToken, startBackgroundRefresh, stopBackgroundRefresh, createPlatformCredentialStore, getAuthRenewalStatus, resolveRenewalWarnDays, type CredentialStore } from "./tokenRefresh"
 import {
   createFileDesignTokenStore,
@@ -3284,6 +3284,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   // wording only ever arrives on stderr, and only matters where
                   // a resume was attempted, so the capture is read there alone.
                   const refusal = classifyResumeRefusal(error, resumeSessionId ? stderrLines.slice(attemptStderrStart).join("\n") : undefined)
+                  const poisonedResume = isToolUseConcurrencyResumeError(error, resumeSessionId)
                   if (refusal === "unresumable") sawUnresumableRefusal = true
                   if (resumeSessionId && (refusal === "busy" || refusal === "unresumable")) {
                     if (resumeRefusalRetries < RESUME_REFUSAL_MAX_RETRIES) {
@@ -3308,14 +3309,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   // is gone whatever the last attempt was refused with, so a
                   // wording that alternates cannot escape to the client. Evict
                   // and replay the history as a fresh session (one-shot).
-                  if (refusal === "missing-message" || sawUnresumableRefusal) {
+                  if (poisonedResume || refusal === "missing-message" || sawUnresumableRefusal) {
+                    const replayReason = poisonedResume ? "tool-use-concurrency" : refusal
                     claudeLog("session.resume_replay", {
                       mode: "non_stream",
-                      refusal,
+                      refusal: replayReason,
                       rollbackUuid: undoRollbackUuid,
                       resumeSessionId,
                     })
-                    plog(`[PROXY] ${requestMeta.requestId} session unusable (${refusal}), evicting and replaying as fresh session`)
+                    plog(`[PROXY] ${requestMeta.requestId} session unusable (${replayReason}), evicting and replaying as fresh session`)
                     managedForkSuperseded = true
                     await abandonManagedFork("resume_replay")
                     if (!evictSession(
@@ -4324,6 +4326,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // where a resume was attempted, so the capture is read there
                     // alone.
                     const refusal = classifyResumeRefusal(error, resumeSessionId ? stderrLines.slice(attemptStderrStart).join("\n") : undefined)
+                    const poisonedResume = isToolUseConcurrencyResumeError(error, resumeSessionId)
                     if (refusal === "unresumable") sawUnresumableRefusal = true
                     if (resumeSessionId && (refusal === "busy" || refusal === "unresumable")) {
                       if (resumeRefusalRetries < RESUME_REFUSAL_MAX_RETRIES) {
@@ -4345,14 +4348,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // The session cannot serve this turn — evict and replay
                     // the history as a fresh session (one-shot). See the
                     // non-stream branch above for the full rationale.
-                    if (refusal === "missing-message" || sawUnresumableRefusal) {
+                    if (poisonedResume || refusal === "missing-message" || sawUnresumableRefusal) {
+                      const replayReason = poisonedResume ? "tool-use-concurrency" : refusal
                       claudeLog("session.resume_replay", {
                         mode: "stream",
-                        refusal,
+                        refusal: replayReason,
                         rollbackUuid: undoRollbackUuid,
                         resumeSessionId,
                       })
-                      plog(`[PROXY] ${requestMeta.requestId} session unusable (${refusal}), evicting and replaying as fresh session`)
+                      plog(`[PROXY] ${requestMeta.requestId} session unusable (${replayReason}), evicting and replaying as fresh session`)
                       managedForkSuperseded = true
                       await abandonManagedFork("resume_replay")
                       if (!evictSession(

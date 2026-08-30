@@ -2,7 +2,7 @@
  * Unit tests for classifyError — pure function, no mocks needed.
  */
 import { describe, it, expect } from "bun:test"
-import { canRecoverCapturedToolUses, classifyError, extendedContextHint, classifyResumeRefusal, isBusySessionError, isExtraUsageRequiredError, extractSdkTermination, formatSdkTermination, isAccountFailoverError, isQuotaRefusal, isRateLimitError } from "../proxy/errors"
+import { canRecoverCapturedToolUses, classifyError, extendedContextHint, classifyResumeRefusal, isBusySessionError, isExtraUsageRequiredError, isToolUseConcurrencyResumeError, extractSdkTermination, formatSdkTermination, isAccountFailoverError, isQuotaRefusal, isRateLimitError } from "../proxy/errors"
 
 describe("classifyError", () => {
   describe("authentication errors", () => {
@@ -381,6 +381,26 @@ describe("classifyError", () => {
       // carries nothing but an exit code, so this one is not value-bound.
       expect(classifyResumeRefusal("exit 1", busyRefusal)).toBe("busy")
       expect(classifyResumeRefusal(null, busyRefusal)).toBe("busy")
+    })
+  })
+
+  describe("tool-use concurrency poisoned resume", () => {
+    const syntheticError = "Claude Code returned an error result: API Error: 400 due to tool use concurrency issues"
+
+    it("matches the stable phrase inside a resumed synthetic 400", () => {
+      expect(isToolUseConcurrencyResumeError(new Error(syntheticError), "sdk-original")).toBe(true)
+      expect(isToolUseConcurrencyResumeError(
+        new Error("Claude Code returned an error result: API Error: 400 invalid request: tool use concurrency mismatch"),
+        "sdk-original",
+      )).toBe(true)
+    })
+
+    it("requires both a resumed session and the synthetic status-400 context", () => {
+      expect(isToolUseConcurrencyResumeError(new Error(syntheticError))).toBe(false)
+      expect(isToolUseConcurrencyResumeError(new Error("API Error: 500 due to tool use concurrency issues"), "sdk-original")).toBe(false)
+      expect(isToolUseConcurrencyResumeError(new Error("tool use concurrency issues"), "sdk-original")).toBe(false)
+      expect(isToolUseConcurrencyResumeError(new Error("API Error: 400 unrelated invalid request"), "sdk-original")).toBe(false)
+      expect(isToolUseConcurrencyResumeError(syntheticError, "sdk-original")).toBe(false)
     })
   })
 

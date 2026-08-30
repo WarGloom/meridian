@@ -42,6 +42,11 @@ let refuseAttempts = 1
 let missingMessage = false
 /** Per-attempt wordings, when the refusal is not the same one every time. */
 let refusalScript: Array<"unresumable" | "busy"> = []
+let poisonedResume = false
+let freshReplayFailure: string | undefined
+
+const TOOL_USE_CONCURRENCY_ERROR =
+  "Claude Code returned an error result: API Error: 400 due to tool use concurrency issues"
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: (opts: any) => {
@@ -54,6 +59,12 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
       ? { ...message, session_id: returnedSessionId }
       : message
     return (async function* () {
+      if (poisonedResume && opts.options?.resume) {
+        throw new Error(TOOL_USE_CONCURRENCY_ERROR)
+      }
+      if (poisonedResume && freshReplayFailure && !opts.options?.resume) {
+        throw new Error(freshReplayFailure)
+      }
       // The CLI refuses the resume while the previous subprocess for this
       // session is still exiting. The session itself is intact.
       const scripted = refusalScript[callIndex - 1]
@@ -140,6 +151,8 @@ describe("Resume refusal", () => {
     refuseAttempts = 1
     missingMessage = false
     refusalScript = []
+    poisonedResume = false
+    freshReplayFailure = undefined
   })
 
   it("retries the same resume instead of evicting the session (non-streaming)", async () => {
@@ -225,5 +238,39 @@ describe("Resume refusal", () => {
     expect(queryCalls[0]!.resume).toBe("sdk-original")
     expect(queryCalls.length).toBe(2)
     expect(queryCalls[1]!.resume).toBeUndefined()
+  })
+
+  it.each([
+    ["non-streaming", false],
+    ["streaming", true],
+  ])("replays a poisoned resume fresh exactly once (%s)", async (_label, stream) => {
+    const app = createTestApp()
+    const sessionId = `sess-tool-concurrency-${stream ? "stream" : "non-stream"}`
+    poisonedResume = true
+    storeSession(sessionId, priorMessages, "sdk-original", "/tmp/test")
+
+    const response = await post(app, { model: "sonnet", stream, messages: continuation }, { "x-opencode-session": sessionId })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("response-2")
+
+    expect(queryCalls.filter((call) => call.resume === "sdk-original")).toHaveLength(1)
+    expect(queryCalls).toHaveLength(2)
+    expect(queryCalls[1]!.resume).toBeUndefined()
+  })
+
+  it("surfaces a fresh replay failure without resuming the poisoned session again", async () => {
+    const app = createTestApp()
+    const sessionId = "sess-tool-concurrency-fresh-failure"
+    poisonedResume = true
+    freshReplayFailure = "fresh replay failed"
+    storeSession(sessionId, priorMessages, "sdk-original", "/tmp/test")
+
+    const response = await post(app, { model: "sonnet", stream: false, messages: continuation }, { "x-opencode-session": sessionId })
+    expect(response.status).toBe(500)
+    const body = await response.json()
+    expect(body.error.message).toBe(freshReplayFailure)
+
+    expect(queryCalls.filter((call) => call.resume === "sdk-original")).toHaveLength(1)
+    expect(queryCalls).toHaveLength(2)
   })
 })
