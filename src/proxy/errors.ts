@@ -114,6 +114,51 @@ const HTTP_401 = /(?:^|[^0-9a-f])401(?![0-9a-f]|:\d)/
 const HTTP_429 = /(?:^|[^0-9a-f])429(?![0-9a-f]|:\d)/
 const HTTP_500 = /(?:^|[^0-9a-f])500(?![0-9a-f]|:\d)/
 const HTTP_503 = /(?:^|[^0-9a-f])503(?![0-9a-f]|:\d)/
+/** A request whose input exceeds the model's context window.
+ *
+ *  Distinct from a rate limit in the one way that matters to a caller: waiting
+ *  does not fix it. An identical retry burns a whole upstream turn to fail
+ *  identically, so this must not classify as a 5xx — see the branch in
+ *  classifyError for why the status code is the actual fix.
+ *
+ *  Wordings: the CLI's bare "Prompt is too long", the API's fuller
+ *  "prompt is too long: N tokens > M maximum" (same prefix), its max_tokens
+ *  phrasing (backtick-quoted upstream, matched loosely here), and the
+ *  OpenAI-compatible code the openai adapter can surface.
+ *
+ *  Anchored per-line, tolerating the wrapper prefixes the CLI and SDK prepend —
+ *  the same shape as HIT_YOUR_SPEND_LIMIT above, for the same reason. Unanchored
+ *  these matched their own strings quoted inside arbitrary text: an assistant
+ *  turn discussing the error, a tool_result echoing a grep hit, and a plainly
+ *  negated sentence all classified as 400 before the anchor was added.
+ *
+ *  The asymmetry matters here more than it does for a quota refusal. A false 400
+ *  tells the client the request itself is unfixable, so the retry is abandoned
+ *  and legitimate work is silently dropped; a false 5xx only costs a retry.
+ *
+ *  `subprocess stderr` is in the wrapper list because the CLI surfaces an
+ *  oversized prompt by exiting and appending it to stderr — and without this
+ *  branch that shape reads as a bare code-1 exit, which the process-crash branch
+ *  below reports as an auth failure telling the operator to run `claude login`. */
+const OVERFLOW_PHRASES = [
+  String.raw`prompt is too long`,
+  String.raw`input length and .?max_tokens.? exceed context limit`,
+  String.raw`context[_ ]length[_ ]exceeded`,
+]
+
+/** Either the phrase opens a line (after the known SDK/CLI wrappers), or it
+ *  opens the `message` value of an API error envelope — `API Error: 400
+ *  {"type":"invalid_request_error","message":"prompt is too long: ..."}`, which
+ *  is a real upstream shape and not line-anchored. Requiring the phrase to start
+ *  the message value is what separates it from the same words merely quoted
+ *  somewhere inside arbitrary prose. */
+const CONTEXT_OVERFLOW_SIGNALS: readonly RegExp[] = OVERFLOW_PHRASES.map(
+  phrase => new RegExp(
+    String.raw`(?:^\s*(?:(?:error|api error|claude code returned an error result|subprocess stderr):\s*)*|"message"\s*:\s*")`
+    + phrase,
+    "m",
+  ),
+)
 
 /**
  * Detect specific SDK errors and return helpful messages to the client.
@@ -181,6 +226,24 @@ export function classifyError(errMsg: string, model?: string): ClassifiedError {
       status: 402,
       type: "billing_error",
       message: "Claude Max subscription issue. Check your subscription status at https://claude.ai/settings/subscription"
+    }
+  }
+
+  // Context overflow. Ordered before the process-crash branch deliberately:
+  // when the CLI surfaces an oversized prompt by exiting rather than returning
+  // a result, that branch reads a bare code-1 exit as an auth failure and tells
+  // the operator to run `claude login` — advice that cannot work and that hides
+  // the real cause.
+  //
+  // The status code is the fix, not the wording. The default 500 reads as
+  // "transient, try again" to every client retry policy, so an overflow that
+  // can only ever fail identically gets replayed at full upstream cost. 400
+  // says the request itself is the problem.
+  if (CONTEXT_OVERFLOW_SIGNALS.some(rx => rx.test(lower))) {
+    return {
+      status: 400,
+      type: "invalid_request_error",
+      message: "Prompt exceeds the model's context window. Compact or trim the conversation before retrying — an identical retry fails the same way."
     }
   }
 
@@ -403,7 +466,7 @@ export function isExtraUsageRequiredError(errMsg: string): boolean {
  * collapses into a generic api_error.
  */
 export interface SdkTermination {
-  reason: "max_turns" | "process_exit" | "aborted" | "upstream_idle" | "unknown"
+  reason: "max_turns" | "process_exit" | "aborted" | "upstream_idle" | "context_overflow" | "unknown"
   /** Turn count when reason=max_turns and parseable. */
   turns?: number
   /** Exit code when reason=process_exit and parseable. */
@@ -513,6 +576,16 @@ export function extractSdkTermination(errMsg: string): SdkTermination {
     return {
       reason: "max_turns",
       ...(m ? { turns: Number(m[1]) } : {}),
+      ...(stderrTail ? { stderrTail } : {}),
+    }
+  }
+
+  // Same ordering rationale as classifyError: an oversized prompt that arrives
+  // as a process exit must name the overflow, not the exit, or the diagnostic
+  // log points at the wrong thing.
+  if (CONTEXT_OVERFLOW_SIGNALS.some(rx => rx.test(lower))) {
+    return {
+      reason: "context_overflow",
       ...(stderrTail ? { stderrTail } : {}),
     }
   }

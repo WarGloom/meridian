@@ -237,6 +237,12 @@ describe("classifyError", () => {
       expect(canRecoverCapturedToolUses({ ...base, reason: "process_exit" })).toBe(false)
     })
 
+    // An overflow is rejected before generation, so there is nothing captured
+    // to deliver — and replaying the same oversized prompt cannot succeed.
+    it("does not recover a context overflow", () => {
+      expect(canRecoverCapturedToolUses({ ...base, reason: "context_overflow" })).toBe(false)
+    })
+
     // Without captured calls there is nothing to deliver, and outside
     // passthrough the client does not execute tools at all.
     it("requires captured tool calls", () => {
@@ -245,6 +251,98 @@ describe("classifyError", () => {
 
     it("requires passthrough", () => {
       expect(canRecoverCapturedToolUses({ ...base, reason: "max_turns", passthrough: false })).toBe(false)
+    })
+  })
+
+  describe("context overflow", () => {
+    it("classifies the CLI's bare wording", () => {
+      const r = classifyError("Claude Code returned an error result: Prompt is too long")
+      expect(r.status).toBe(400)
+      expect(r.type).toBe("invalid_request_error")
+    })
+
+    it("classifies the API's token-count wording", () => {
+      const r = classifyError('API Error: 400 {"type":"invalid_request_error","message":"prompt is too long: 215843 tokens > 200000 maximum"}')
+      expect(r.status).toBe(400)
+    })
+
+    it("classifies the max_tokens phrasing", () => {
+      const r = classifyError("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
+      expect(r.status).toBe(400)
+    })
+
+    it("classifies the OpenAI-compatible code", () => {
+      const r = classifyError("context_length_exceeded")
+      expect(r.status).toBe(400)
+    })
+
+    // The whole reason this branch sits above the crash branch. Without it the
+    // code-1 path returns 401 and tells the operator to run `claude login` —
+    // advice that cannot work here, for a cause it has hidden.
+    it("wins over a process exit carrying the overflow in stderr", () => {
+      const r = classifyError("Claude Code process exited with code 1\nSubprocess stderr: Prompt is too long")
+      expect(r.status).toBe(400)
+      expect(r.type).toBe("invalid_request_error")
+      expect(r.message).not.toContain("claude login")
+    })
+
+    // A 5xx reads as "transient, try again" to every client retry policy, which
+    // is what replays an unfixable request at full upstream cost.
+    it.each([
+      ["the CLI wording", "Prompt is too long"],
+      ["the OpenAI code", "context_length_exceeded"],
+    ])("never classifies %s as retryable", (_label, msg) => {
+      expect(classifyError(msg).status).toBeLessThan(500)
+    })
+
+    // Mirrors #796: the phrase is word-separated, so an identifier carrying the
+    // same words cannot steal the branch from the real cause.
+    it("ignores an incidental identifier", () => {
+      const r = classifyError("Error: ENOENT: no such file or directory, open '/repo/src/prompt-is-too-long.ts'")
+      expect(r.status).not.toBe(400)
+    })
+
+    // A false 400 is the expensive direction: it tells the client the request is
+    // unfixable, so the retry is abandoned and legitimate work is silently
+    // dropped. Every case below classified as 400 before the pattern was
+    // anchored. Asserting the concrete status, not `not.toBe(400)` — the weaker
+    // form is what let an equivalent regression hide in #908.
+    it.each([
+      ["a negated sentence", "The prompt is too long check did not trigger; this is a network failure"],
+      ["the phrase quoted in prose", 'The assistant replied: "prompt is too long" is a common error message users see'],
+      ["the phrase quoted inside stderr", 'Subprocess stderr: user asked "why does it say prompt is too long?"'],
+      ["a tool_result echoing a grep hit", "tool_result: grep found 'context_length_exceeded' in errors.ts:114"],
+    ])("does not classify %s as an overflow", (_label, msg) => {
+      const r = classifyError(msg)
+      expect(r.status).toBe(500)
+      expect(r.type).toBe("api_error")
+    })
+
+    // The API envelope is the one non-line-anchored shape that must still match,
+    // so the phrase is accepted when it opens a `message` value. That is narrow
+    // on purpose: the same words inside any other field, or partway through the
+    // message, are prose rather than the error itself.
+    //
+    // Known boundary: a tool_result echoing a genuine overflow envelope verbatim
+    // still classifies as 400. Distinguishing it would mean parsing the message
+    // to see whose error it is, and an echoed envelope is a real overflow report
+    // either way — so it is left as the accepted edge rather than widened around.
+    it.each([
+      ["opens the message value", '{"message":"prompt is too long: 215843 tokens > 200000 maximum"}', 400],
+      ["sits in another field", '{"note":"prompt is too long is a common error users hit"}', 500],
+      ["sits partway through the message", '{"message":"the user asked why prompt is too long appears"}', 500],
+    ])("%s", (_label, msg, status) => {
+      expect(classifyError(msg).status).toBe(status)
+    })
+
+    // The overflow branch runs before the process-crash branch but after the
+    // HTTP-status branches, so a real refusal that merely mentions the phrase
+    // keeps its own classification rather than being downgraded to a 400.
+    it.each([
+      ["a rate limit", "429 rate limit exceeded — note: context length exceeded is a different error", 429],
+      ["an auth failure", "401 unauthorized. Docs mention context_length_exceeded elsewhere.", 401],
+    ])("lets %s keep its status", (_label, msg, status) => {
+      expect(classifyError(msg).status).toBe(status)
     })
   })
 
@@ -465,6 +563,26 @@ describe("extractSdkTermination", () => {
       expect(t.reason).toBe("max_turns")
       expect(t.turns).toBe(3)
       expect(t.stderrTail).toContain("Custom betas")
+    })
+  })
+
+  describe("context_overflow", () => {
+    it("names an oversized prompt", () => {
+      const t = extractSdkTermination("Claude Code returned an error result: Prompt is too long")
+      expect(t.reason).toBe("context_overflow")
+    })
+
+    // Ordering guard: the overflow arrives as a process exit often enough that
+    // reading the exit first points the diagnostic log at the wrong thing.
+    it("wins over a process exit carrying the overflow in stderr", () => {
+      const t = extractSdkTermination("process exited with code 1\nSubprocess stderr: Prompt is too long")
+      expect(t.reason).toBe("context_overflow")
+      expect(t.stderrTail).toContain("Prompt is too long")
+    })
+
+    it("survives the round trip into a diagnostic log line", () => {
+      const t = extractSdkTermination("Prompt is too long")
+      expect(formatSdkTermination(t, { model: "sonnet" })).toContain("reason=context_overflow")
     })
   })
 
