@@ -98,7 +98,7 @@ describe("/v1/models profile auth context", () => {
     expect(models.get("claude-fable-5")?.context_window).toBe(1_000_000)
   })
 
-  it("keeps the 200k catalog for a non-Max profile", async () => {
+  it("advertises global 1M support while keeping subscription-gated models at 200k", async () => {
     const { app } = createProxyServer({
       port: 0,
       host: "127.0.0.1",
@@ -108,13 +108,18 @@ describe("/v1/models profile auth context", () => {
 
     const response = await app.fetch(new Request("http://localhost/v1/models"))
     const body = await response.json() as { data: Array<{ id: string; context_window: number }> }
+    const models = new Map(body.data.map((model) => [model.id, model]))
 
     expect(response.status).toBe(200)
     expect(authCalls).toEqual([{
       profileId: "pro",
       envOverrides: { CLAUDE_CONFIG_DIR: "/profiles/pro" },
     }])
-    expect(body.data.every((model) => model.context_window === 200_000)).toBe(true)
+    expect(models.get("claude-fable-5")?.context_window).toBe(1_000_000)
+    expect(models.get("claude-sonnet-5")?.context_window).toBe(1_000_000)
+    expect(body.data
+      .filter((model) => model.id !== "claude-fable-5" && model.id !== "claude-sonnet-5")
+      .every((model) => model.context_window === 200_000)).toBe(true)
   })
 })
 
