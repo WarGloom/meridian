@@ -55,6 +55,22 @@ const BILLING_SIGNALS: readonly RegExp[] = [
   /update your payment/,
   /(?:out of|draw from|draws from) extra usage/,
   /insufficient (?:credit|funds|balance)/,
+  // The credits-era entitlement cap: "Your group's usage limit is set to $0 ·
+  // run /usage-credits to ask your admin for a higher limit" (#909, verbatim in
+  // the CLI). billing_error rather than rate_limit_error: a provisioned cap is
+  // not a spent window, so isQuotaRefusal must not send the cooldown looking up
+  // a five-hour reset that will never arrive.
+  //
+  // This only disambiguates the wordings that name the cap. The CLI's refusal
+  // builder returns the identical "You've reached your <tier> limit." text for
+  // group/member/seat_tier zero-credit caps as for a genuinely spent window, so
+  // those still classify 429 and still take the five-hour cooldown. Telling
+  // them apart needs a signal the message does not carry.
+  //
+  // Line-anchored for the reason given above: this branch can mark every
+  // profile in a pool exhausted (#796), so an MCP server or an assistant turn
+  // echoing the sentence mid-line must not trigger it.
+  /^\s*(?:(?:error|api error|claude code returned an error result|subprocess stderr):\s*)*your (?:group|organization|org)(?:'|’)s usage limit is set to \$\d/m,
 ]
 
 /** "hit your limit", "hit your session limit", "hit your weekly limit", and any
@@ -98,6 +114,26 @@ const HIT_YOUR_LIMIT = /hit your (?:[\w-]+ )?limit/
  *  further means enumerating qualifiers, which is what missed the org wording
  *  in the first place. */
 const HIT_YOUR_SPEND_LIMIT = /^\s*(?:(?:error|api error|claude code returned an error result|subprocess stderr):\s*)*you(?:'|’)ve hit your (?:[\w'’-]+ ){0,4}(?:spend|usage) limit/m
+
+/** Credits-era per-tier banner uses "reached", not the "hit" wording from
+ * #764 and #787. Enumerate tiers rather than wildcarding the qualifier: the
+ * CLI also emits "reached your specified/configured ..." prose that is not
+ * account quota exhaustion (#909). A numeric version suffix accepts real tier
+ * versions without arbitrary words, and only known CLI command suffixes are
+ * accepted: a false positive exhausts a healthy profile pool-wide, so the
+ * banner must occupy its whole line rather than merely open one. New tier
+ * names must be added to the enumeration.
+ *
+ * The bound is the LINE, not the message — `/m`, like HIT_YOUR_SPEND_LIMIT
+ * above and CONTEXT_OVERFLOW_SIGNALS below. `server.ts` appends captured
+ * stderr to `Error.message` before classification, so a message-final anchor
+ * is unreachable in production; and because `stderrLines.join("\n")` labels
+ * only its FIRST line with `Subprocess stderr:`, requiring a labelled line
+ * missed the banner whenever anything preceded it — which on Team plans is
+ * always, the harmless "custom betas" warning being emitted first. Both shapes
+ * then fell through to the code-1 branch, which tells the operator to run
+ * `claude login` for what is actually a quota refusal. */
+const REACHED_YOUR_TIER_LIMIT = /^[ \t]*(?:(?:error|api error|claude code returned an error result|subprocess stderr):[ \t]*)*you(?:'|’)ve reached your (?:claude )?(?:fable|mythos|opus|sonnet|haiku)(?: \d+(?:\.\d+)*)? limit(?:(?:[.!][ \t]+|[ \t]+)(?:(?:run[ \t]+)?\/usage-credits(?:[ \t]+to[ \t]+continue)?(?:[ \t]+or[ \t]+switch[ \t]+models[ \t]+with[ \t]+\/model)?|\/model[ \t]+to[ \t]+switch[ \t]+models)\.?|[.!]?)[ \t\r]*$/m
 
 /** Canonical Claude Code usage-credit banner. Anchor on the raw message or the
  * known SDK wrappers so quoted docs, MCP stderr, and negated/incidental prose
@@ -201,7 +237,7 @@ export function classifyError(errMsg: string, model?: string): ClassifiedError {
   // variants seen so far and the daily/monthly/5-hour ones that would
   // otherwise be the next report.
   if (HTTP_429.test(lower) || lower.includes("rate limit") || lower.includes("too many requests")
-    || HIT_YOUR_LIMIT.test(lower) || HIT_YOUR_SPEND_LIMIT.test(lower)
+    || HIT_YOUR_LIMIT.test(lower) || HIT_YOUR_SPEND_LIMIT.test(lower) || REACHED_YOUR_TIER_LIMIT.test(lower)
     || lower.includes("usage limit reached")
     || OUT_OF_USAGE_CREDITS.test(lower)) {
     const hint = lower.includes("1m") || lower.includes("context")

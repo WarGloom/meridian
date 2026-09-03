@@ -826,6 +826,117 @@ describe("classifyError: session/usage limit phrasings (live-observed)", () => {
     expect(classifyError(msg).type).not.toBe("rate_limit_error")
   })
 
+  it("maps the CLI's per-tier limit refusal to rate_limit_error without a same-profile retry", () => {
+    const msg = "Claude Code returned an error result: You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+    const r = classifyError(msg)
+    expect(r.type).toBe("rate_limit_error")
+    expect(r.status).toBe(429)
+    expect(isRateLimitError(msg)).toBe(false)
+    expect(isAccountFailoverError(r.type)).toBe(true)
+  })
+
+  it("maps the live per-tier refusal with appended beta-warning stderr to rate_limit_error", () => {
+    const msg = "Claude Code returned an error result: You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.\nSubprocess stderr: Warning: Custom betas are only available for API key users. Ignoring provided betas."
+    const r = classifyError(msg)
+    expect(r.type).toBe("rate_limit_error")
+    expect(r.status).toBe(429)
+  })
+
+  it.each([
+    ["bare banner", "You've reached your Fable 5 limit."],
+    ["nested SDK wrappers", "Error: API Error: You’ve reached your Fable 5 limit! /model to switch models."],
+    ["Opus tier", "You've reached your Opus limit"],
+    ["versioned Sonnet tier", "You've reached your Sonnet 4.6 limit"],
+    ["Claude-prefixed tier", "You've reached your Claude Opus 4.6 limit"],
+    ["space-separated model command", "You've reached your Fable 5 limit /model to switch models."],
+    ["multiline subprocess stderr", "Claude Code process exited with code 1\nSubprocess stderr: You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."],
+    // server.ts appends captured stderr to Error.message before classification,
+    // so the banner is routinely NOT the last thing in the message. These are
+    // the shapes that reach classifyError in production; each returned 500
+    // api_error (or, with nothing else to go on, a 401 telling the operator to
+    // run `claude login`) until the bound became the line rather than the
+    // message. See REACHED_YOUR_TIER_LIMIT.
+    ["banner then unrelated appended stderr", "You've reached your Fable 5 limit.\nSubprocess stderr: unrelated tool output"],
+    // stderrLines.join("\n") labels only the first line, and on Team plans the
+    // harmless betas warning is always emitted first — so the real banner
+    // arrives on an unlabelled second line.
+    ["beta warning first, banner on an unlabelled line", "Claude Code process exited with code 1\nSubprocess stderr: Warning: Custom betas are only available for API key users. Ignoring provided betas.\nYou've reached your Fable 5 limit."],
+    ["generic error newline", "Error:\nYou've reached your Fable 5 limit."],
+    ["SDK wrapper newline", "Claude Code returned an error result:\nYou've reached your Fable 5 limit."],
+    ["trailing newline", "You've reached your Fable 5 limit.\n"],
+    ["CRLF line ending", "You've reached your Fable 5 limit.\r\n"],
+  ])("maps the credits-era per-tier %s to rate_limit_error", (_label, msg) => {
+    const r = classifyError(msg)
+    expect(r.type).toBe("rate_limit_error")
+    expect(r.status).toBe(429)
+  })
+
+  it.each([
+    ["specified limit", "You've reached your specified limit"],
+    ["quoted banner", "The docs say ‘You've reached your Fable 5 limit.’"],
+    ["negated banner", "You've not reached your Fable 5 limit"],
+    ["filename prefix", "Claude Code returned an error result: usage-credits.ts says You've reached your Fable 5 limit."],
+    ["configured tool qualifier", "You've reached your Fable configured tool limit"],
+    ["limitations suffix", "You've reached your Fable 5 limitations"],
+    ["unlabelled multiline quote", "MCP server failed:\nYou've reached your Fable 5 limit (quoted from docs)"],
+    ["parenthetical documentation suffix", "You've reached your Fable 5 limit (quoted from docs, account healthy)"],
+    ["documentation sentence suffix", "Error: You've reached your Fable 5 limit. This is only a documentation example"],
+    ["false assertion suffix", "You've reached your Fable 5 limit is false"],
+    ["possessive threshold suffix", "You've reached your Fable 5 limit's configured warning threshold"],
+    ["joined run command", "You've reached your Fable 5 limitRun /usage-credits"],
+    ["joined usage command", "You've reached your Fable 5 limit/usage-credits"],
+    ["unspaced punctuated command", "You've reached your Fable 5 limit.Run /usage-credits"],
+  ])("does not classify credits-era per-tier %s as a rate limit", (_label, msg) => {
+    expect(classifyError(msg).type).toBe("api_error")
+  })
+
+  // The second refusal in #909. An entitlement cap, not a spent window, so it
+  // is billing_error: it still fails over via ACCOUNT_FAILOVER_ERROR_TYPES,
+  // but without isQuotaRefusal sending the cooldown to wait out a five-hour
+  // reset that will never arrive.
+  it.each([
+    ["group", "Your group's usage limit is set to $0 · run /usage-credits to request more"],
+    ["organization", "Your organization's usage limit is set to $250 · run /usage-credits to request more"],
+    ["typographic apostrophe", "Your group’s usage limit is set to $0"],
+    ["behind an SDK wrapper", "Claude Code returned an error result: Your group's usage limit is set to $0 · run /usage-credits to request more"],
+    ["on an unlabelled stderr line", "Claude Code process exited with code 1\nSubprocess stderr: Warning: ignoring provided betas.\nYour group's usage limit is set to $0"],
+  ])("maps the %s entitlement cap to a failover-eligible billing_error", (_label, msg) => {
+    const r = classifyError(msg)
+    expect(r.type).toBe("billing_error")
+    expect(r.status).toBe(402)
+    expect(isAccountFailoverError(r.type)).toBe(true)
+    expect(isQuotaRefusal(r.type)).toBe(false)
+  })
+
+  it.each([
+    ["quoted mid-line", "The docs say your group's usage limit is set to $0"],
+    ["no amount", "Your group's usage limit is set to whatever the admin picked"],
+  ])("does not treat %s as an entitlement cap", (_label, msg) => {
+    expect(classifyError(msg).type).not.toBe("billing_error")
+  })
+
+  // Verbatim from the refusal builder in the shipped CLI
+  // (@anthropic-ai/claude-code 2.1.198). It emits exactly these two suffixes —
+  // one per interactive/non-interactive copy branch — so these two strings are
+  // what actually reaches classifyError. Pinned so a copy change in a future
+  // CLI shows up here rather than as another silent 500 in a priority pool.
+  it.each([
+    ["interactive copy", "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."],
+    ["non-interactive copy", "You've reached your Fable 5 limit. /model to switch models."],
+  ])("maps the shipped CLI's %s to rate_limit_error", (_label, msg) => {
+    const r = classifyError(msg)
+    expect(r.type).toBe("rate_limit_error")
+    expect(r.status).toBe(429)
+    expect(isAccountFailoverError(r.type)).toBe(true)
+  })
+
+  it("classifies the verbatim group entitlement cap as a failover-eligible billing_error", () => {
+    const r = classifyError("Your group's usage limit is set to $0 \u00b7 run /usage-credits to ask your admin for a higher limit")
+    expect(r.type).toBe("billing_error")
+    expect(isAccountFailoverError(r.type)).toBe(true)
+    expect(isQuotaRefusal(r.type)).toBe(false)
+  })
+
   // #764 and #787 were the same bug twice: a new qualifier, a 500 instead of
   // failover, a PR. These pin the shape so the next variant is already covered.
   it.each([

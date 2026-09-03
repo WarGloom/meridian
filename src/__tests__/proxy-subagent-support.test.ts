@@ -8,7 +8,11 @@
  * 4. Multiple tool calls in a single response
  */
 
-import { describe, it, expect, mock, beforeEach } from "bun:test"
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { setSessionStoreDir } from "../proxy/sessionStore"
 import {
   messageStart,
   textBlockStart,
@@ -24,6 +28,36 @@ import {
   parseSSE,
   withMockSdkSessionId,
 } from "./helpers"
+
+let isolatedSessionDir = ""
+beforeEach(() => {
+  if (proxyServer && proxyServer.getInFlightCount!() !== 0) {
+    throw new Error("Previous proxy did not drain; refusing to switch the process-global session store")
+  }
+  proxyServer = undefined
+  isolatedSessionDir = mkdtempSync(join(tmpdir(), "meridian-subagent-support-"))
+  setSessionStoreDir(isolatedSessionDir)
+})
+afterEach(async () => {
+  if (proxyServer) {
+    for (let i = 0; i < 100 && proxyServer.getInFlightCount!() !== 0; i++) {
+      await Bun.sleep(1)
+    }
+    if (proxyServer.getInFlightCount!() !== 0) {
+      proxyServer.forceAbortInFlight!()
+      for (let i = 0; i < 1000 && proxyServer.getInFlightCount!() !== 0; i++) {
+        await Bun.sleep(1)
+      }
+    }
+  }
+  const drained = !proxyServer || proxyServer.getInFlightCount!() === 0
+  if (drained) {
+    if (proxyServer) await proxyServer.sweepSessionGc!()
+    setSessionStoreDir(null)
+    rmSync(isolatedSessionDir, { recursive: true, force: true })
+  }
+  expect(drained).toBe(true)
+})
 
 // --- Capture SDK calls ---
 let mockMessages: any[] = []
@@ -58,10 +92,11 @@ mock.module("../mcpTools", () => ({
 }))
 
 const { createProxyServer } = await import("../proxy/server")
+let proxyServer: ReturnType<typeof createProxyServer> | undefined
 
 function createTestApp() {
-  const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
-  return app
+  proxyServer = createProxyServer({ port: 0, host: "127.0.0.1" })
+  return proxyServer.app
 }
 
 async function postMessages(app: any, body: Record<string, unknown>) {
@@ -140,6 +175,9 @@ describe("Phase 3: Concurrent request support", () => {
       postMessages(app, makeRequest({ stream: false })),
       postMessages(app, makeRequest({ stream: false })),
     ])
+
+    expect(r1.status).toBe(200)
+    expect(r2.status).toBe(200)
 
     const [b1, b2] = await Promise.all([
       r1.json() as Promise<any>,
