@@ -582,7 +582,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
   // Cache last-seen tool definitions per agent session to prevent prompt cache
   // invalidation when clients intermittently omit tools on continuation requests.
-  const sessionToolCache = new LRUMap<string, any[]>(getMaxSessionsLimit())
+  const sessionToolCache = new LRUMap<string, { sdkSessionId: string; tools: any[] }>(getMaxSessionsLimit())
   // Cache the passthrough MCP server per session. Reusing the same server
   // across turns (when the tool set is unchanged) avoids subtle prompt-cache
   // invalidation from MCP server re-creation. Key hashes tool name + schema
@@ -2044,8 +2044,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // can differ per attempt), but "did this session advance" is only
         // meaningful within one profile's cache scope — so commits and the
         // conflict check below both carry profileSessionId.
-        const commitSessionTurn = () => {
-          if (profileSessionId) requestMeta.sessionTurnLease?.markCommitted(profileSessionId)
+        const commitSessionTurn = (committedSdkSessionId: string | undefined) => {
+          if (profileSessionId) {
+            requestMeta.sessionTurnLease?.markCommitted(profileSessionId)
+            // Tool inheritance belongs to the successfully published branch.
+            // Failed side calls must not replace the main turn's tool set, and
+            // an empty fresh branch must not inherit or retain another's tools.
+            if (passthrough && committedSdkSessionId) {
+              sessionToolCache.set(profileSessionId, { sdkSessionId: committedSdkSessionId, tools: requestTools })
+            }
+          }
         }
         // Use the client-local CWD for fingerprint bucketing so that two
         // independent client projects don't collide on the same first-user-
@@ -2150,8 +2158,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // the keyed fork/subagent note above. Serializing them is still worth
         // doing, but a reclassification is their normal cost; refusing them
         // would break flows that worked before turn coordination existed.
+        //
+        // An adapter can declare the same fact for its whole protocol when the
+        // client has no per-flow signal to send: pi carries one session id for
+        // the main turn and its side calls alike, so the loser of that race is
+        // reclassified rather than refused. See runsConcurrentTurnsPerSessionKey.
+        const declaresPerRequestConcurrentFlow =
+          requestSource?.startsWith("fork-") === true
+          || isSubagentRequest
         const declaresConcurrentFlow =
-          requestSource?.startsWith("fork-") === true || isSubagentRequest
+          declaresPerRequestConcurrentFlow
+          || adapter.runsConcurrentTurnsPerSessionKey === true
         // NOTE: agent-specific (opencode) — OpenCode begins the tool-result
         // request as soon as the visible checkpoint closes, while Meridian is
         // still draining and committing that checkpoint. Its prompt envelope
@@ -2180,15 +2197,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             }
           }
         }
-        if (
+        // The account this turn holds was rewritten while it waited: it lost a
+        // commit race, so the branch its body carries is no longer authoritative.
+        const lostRaceWhileWaiting = Boolean(
           agentSessionId &&
           profileSessionId &&
-          !declaresConcurrentFlow &&
           !advancesDurableCheckpoint &&
           (requestMeta.sessionTurnLease?.advancedWhileWaiting(profileSessionId) || advancedAcrossProcesses) &&
           lineageResult.type !== "continuation" &&
           lineageResult.type !== "compaction"
-        ) {
+        )
+        if (lostRaceWhileWaiting && !declaresConcurrentFlow) {
           const reason = lineageResult.type === "diverged" ? lineageResult.reason : lineageResult.type
           const message = "This session advanced while the request was waiting. Retry with the latest conversation history or use a distinct session ID."
           claudeLog("session.concurrent_conflict", {
@@ -2245,6 +2264,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               headers: { "Content-Type": "application/json" },
             },
           )
+        }
+        // Admitting a protocol-declared flow is not the same as trusting its
+        // lineage. A loser holding a prefix of the committed history reads as an
+        // undo, and honouring that would rewind the session that just committed
+        // to serve a turn which merely arrived late. Pi's title generation is
+        // exactly that shape. Replay its own body instead. A per-request fork
+        // or subagent signal keeps its lineage: those callers name their own
+        // session boundary, so an undo from them is deliberate.
+        if (
+          lostRaceWhileWaiting &&
+          !declaresPerRequestConcurrentFlow &&
+          adapter.runsConcurrentTurnsPerSessionKey === true &&
+          lineageResult.type === "undo"
+        ) {
+          lineageResult = { type: "diverged", reason: "concurrent-race" }
         }
         if (options.forceFreshPriorityReplay) {
           if (!options.priorityPublication || !agentSessionId || !durableMappingKey) {
@@ -2802,11 +2836,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       if (advisorModel) {
         requestTools = stripAdvisorTools(requestTools)
       }
-      if (passthrough && requestTools.length === 0 && profileSessionId) {
+      if (passthrough && isResume && requestTools.length === 0 && profileSessionId) {
         const cached = sessionToolCache.get(profileSessionId)
-        if (cached && cached.length > 0) {
-          requestTools = cached
-          plog(`[PROXY] ${requestMeta.requestId} tools_restored: client sent 0 tools but session had ${cached.length} — reusing cached tools to preserve prompt cache`)
+        if (cached && cached.sdkSessionId === resumeSessionId && cached.tools.length > 0) {
+          requestTools = cached.tools
+          plog(`[PROXY] ${requestMeta.requestId} tools_restored: client sent 0 tools but continued branch had ${cached.tools.length} — reusing cached tools to preserve prompt cache`)
         }
       }
       if (passthrough && requestTools.length > 0) {
@@ -2823,7 +2857,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             }
           }
         }
-        if (profileSessionId) sessionToolCache.set(profileSessionId, requestTools)
       }
       const hasDeferredTools = passthroughMcp?.hasDeferredTools ?? false
       // Count deferred tools: when auto-defer is active, non-core tools are deferred
@@ -3992,7 +4025,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       releaseManagedPins()
                       void sweepSessionGc()
                     }
-                    commitSessionTurn()
+                    commitSessionTurn(currentSessionId)
                   }
                 }
               }
@@ -5044,7 +5077,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       releaseManagedPins()
                       void sweepSessionGc()
                     }
-                    commitSessionTurn()
+                    commitSessionTurn(currentSessionId)
                   }
                 }
               }
@@ -5372,7 +5405,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     mappingExpectedGeneration = recoveryMappingStored
                     recoveryForkPublished = true
                     void sweepSessionGc()
-                    commitSessionTurn()
+                    commitSessionTurn(recoverySessionId)
                   }
                 }
                 if (!recoveryForkPublished) {
@@ -5930,7 +5963,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       releaseManagedPins()
                       void sweepSessionGc()
                     }
-                    commitSessionTurn()
+                    commitSessionTurn(currentSessionId)
                   }
                   if (mappingStored) {
                     claudeLog("passthrough.checkpoint_persisted", {
