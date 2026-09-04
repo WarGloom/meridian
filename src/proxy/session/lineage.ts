@@ -427,9 +427,15 @@ function findSuffixAnchorStart(
  * Decision matrix:
  *   Full prefix match (fast-path)          → continuation (resume from stored count)
  *   Suffix overlap >= MIN_SUFFIX           → compaction   (resume after matched suffix)
+ *   Trailing user slot gained blocks       → continuation (resume mid-message)
  *   Prefix overlap > 0, no suffix, shrank  → undo         (fork at rollback point)
  *   Cached prefix changed while growing    → diverged     (fresh full-history replay)
  *   No overlap                             → diverged     (fresh full-history replay)
+ *
+ * Appended content is admissible only when the complete stored prefix is
+ * unchanged and the new content is delivered. Removed content is a history
+ * rewrite: retaining a superset can preserve instructions the client revoked.
+ * Known transient metadata is canonicalized by the owning agent adapter.
  */
 export function verifyLineage(
   cached: SessionState,
@@ -513,9 +519,11 @@ export function verifyLineage(
   // slot instead of appending a new message. The SDK session already contains
   // the old blocks; resume with only the newly appended tool_result blocks.
   //
-  // This is deliberately narrow. Arbitrary text edits and changed existing
-  // blocks still diverge, preserving the stale-lineage safety fixes in #689 and
-  // #692. Legacy sessions without block hashes also keep replaying safely.
+  // This stays narrow: `preservesStoredBlocks` requires every stored block to
+  // survive byte-identical as a strict prefix, so changed existing blocks and
+  // rewritten history still diverge, preserving the stale-lineage safety fixes
+  // in #689 and #692. Legacy sessions without block hashes also keep replaying
+  // safely.
   const boundary = cached.messageCount - 1
   if (
     boundary >= 0 &&
@@ -538,13 +546,27 @@ export function verifyLineage(
           .filter((block) => block?.type === "tool_result" && typeof block.tool_use_id === "string")
           .map((block) => block.tool_use_id as string),
       )
-      const hasOnlyNewToolResults = appendedBlocks.every((block) => {
-        if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") return false
+      // NOTE: OpenCode appends reminder text to completed tool-result slots.
+      // Non-tool_result blocks may only be appended to a slot that is already a
+      // tool-result turn. That is the OpenCode shape — reminder text trailing
+      // the results of a turn the client is still completing. Appending text to
+      // a plain user message is a different thing: the user edited their own
+      // turn, which must still diverge.
+      const storedPrefixHasToolResult = incomingBlocks
+        .slice(0, storedBlocks.length)
+        .some((block) => block?.type === "tool_result")
+      // A tool_result must be genuinely new — repeating a tool_use_id the stored
+      // prefix already carries would replay a result the session has seen.
+      // Other appended content must sit strictly beyond the intact stored
+      // prefix; it never substitutes for an existing block.
+      const appendedBlocksAreNew = appendedBlocks.every((block) => {
+        if (block?.type !== "tool_result") return storedPrefixHasToolResult
+        if (typeof block.tool_use_id !== "string") return false
         if (seenToolResultIds.has(block.tool_use_id)) return false
         seenToolResultIds.add(block.tool_use_id)
         return true
       })
-      if (preservesStoredBlocks && hasOnlyNewToolResults) {
+      if (preservesStoredBlocks && appendedBlocksAreNew) {
         return {
           type: "continuation",
           session: cached,
