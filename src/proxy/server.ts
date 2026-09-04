@@ -7014,6 +7014,41 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       )
     }
 
+    // Validate structured output here, while the client's own spelling is still
+    // known. The inner hop only sees the translated `output_config`, so letting
+    // it reject would name a field the OpenAI caller never sent.
+    // `null` is omission, not a request for structured output — see
+    // translateResponseFormat. Skipping it also keeps the error dialect honest:
+    // a null alongside an Anthropic-style `output_config.format` would
+    // otherwise report failures against `response_format.*`, a field the client
+    // did not meaningfully send.
+    if (rawBody.response_format !== undefined && rawBody.response_format !== null) {
+      // NOTE: agent-specific. OpenAI permits `tools` and `response_format`
+      // together; structured-output mode cannot honour both, because it buffers
+      // the wire events and replaces the content, swallowing the tool_use turn
+      // (see parseOutputFormat). /v1/messages 400s that combination and keeps
+      // doing so — nothing has ever depended on it working there.
+      //
+      // This endpoint is different: `response_format` was dropped entirely
+      // before structured output existed, so tool calling worked and clients
+      // (LangChain agents, LiteLLM) rely on it. 400ing them delivers neither
+      // capability; dropping the schema delivers the larger one. Reject only
+      // when nothing the caller asked for can be honoured.
+      const hasTools = Array.isArray(anthropicBody.tools) && anthropicBody.tools.length > 0
+      if (hasTools && anthropicBody.output_config?.format !== undefined) {
+        const { format: _unsupportedWithTools, ...rest } = anthropicBody.output_config
+        anthropicBody.output_config = Object.keys(rest).length > 0 ? rest : undefined
+        claudeLog("openai.structured_output_dropped", { reason: "tools_present" })
+      }
+      const parsed = parseOutputFormat(anthropicBody.output_config, anthropicBody.tools, "openai")
+      if (!parsed.ok) {
+        return c.json(
+          { type: "error", error: { type: "invalid_request_error", message: parsed.message } },
+          400
+        )
+      }
+    }
+
     // Route internally via app.fetch() — no network roundtrip.
     // Hono resolves the path in-process; the URL scheme/host are ignored.
     // Forward the caller's auth headers so requireAuth on /v1/messages accepts
