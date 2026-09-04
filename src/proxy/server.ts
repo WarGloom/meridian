@@ -74,7 +74,8 @@ import type { AnthropicSseEvent } from "./openai"
 import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, buildModelList, createSseTranslator } from "./openai"
 import { normalizeJcodeSessionId } from "./adapters/jcode"
 import { translateResponsesToAnthropic, translateAnthropicToResponses, createResponsesSseTranslator, reasoningRequested, type ResponsesRequest, type AnthropicSseEvent as ResponsesAnthropicSseEvent } from "./openaiResponses"
-import { extractAdvisorModel, extractSystemText, getLastUserMessage, stripAdvisorTools, stripNonStandardStreamFields, consolidateMultimodalOntoLastUser, MULTIMODAL_TYPES, buildToolUseIndex, describeToolCall, frameReplayTurns } from "./messages"
+import { flattenAssistantContent, normalizeStructuredUserContent, replayToolResultHeader, frameStructuredReplay } from "./replay"
+import { extractAdvisorModel, extractSystemText, getLastUserMessage, stripAdvisorTools, stripNonStandardStreamFields, consolidateMultimodalOntoLastUser, MULTIMODAL_TYPES, buildToolUseIndex, frameReplayTurns } from "./messages"
 import { requireAuth, authEnabled } from "./auth"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, resolveQueryConfigDir, type QueryContext } from "./query"
@@ -109,7 +110,7 @@ import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
 import { detectTokenAnomalies, formatAnomalyAlerts, type TokenSnapshot } from "./tokenHealth"
 import { computeCacheHitRate, formatUsageSummary } from "./tokenUsage"
-import { sanitizeTextContent, sanitizeAssistantText } from "./sanitize"
+import { sanitizeTextContent } from "./sanitize"
 import {
   computeLineageHash,
   hashMessage,
@@ -164,7 +165,7 @@ import {
   commitFork,
   canonicalizeTranscriptLocator,
   ensureTranscriptJournaled,
-  prepareFork,
+  prepareForkForPublication,
   publishPinnedTranscript,
   registerLiveTranscript,
   releaseActiveTranscriptLease,
@@ -366,58 +367,6 @@ function stripCacheControlDeep(content: any): any {
   })
 }
 
-function normalizeStructuredUserContent(
-  content: any,
-  preserveToolResultWrapper = false
-): any {
-  if (!Array.isArray(content)) return content
-  const normalized: any[] = []
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue
-    if (
-      !preserveToolResultWrapper &&
-      block.type === "tool_result" &&
-      Array.isArray(block.content) &&
-      hasMultimodalContent(block.content)
-    ) {
-      normalized.push(...normalizeStructuredUserContent(block.content))
-      continue
-    }
-    if (block.type === "tool_result" && Array.isArray(block.content)) {
-      normalized.push({
-        ...block,
-        content: normalizeStructuredUserContent(block.content, preserveToolResultWrapper),
-      })
-      continue
-    }
-    normalized.push(block)
-  }
-  return normalized
-}
-
-/**
- * Flatten an assistant message's content to plain text for replay.
- *
- * Drops tool_use blocks entirely. The SDK already has them from its own
- * session state (on resume) or doesn't need them for text-only replay
- * (on rehydration). Emitting `[Tool Use: name(args)]` strings pollutes
- * the context — the model reads them as literal user input and starts
- * inventing fake tool-call patterns back (issue #111, #386).
- */
-function flattenAssistantContent(content: any): string {
-  // Strips only branded harness markers — notably Meridian's own "Files
-  // changed:" summary, which this server appends to the assistant's last text
-  // block and which the client then echoes back for replay (#724). The XML tag
-  // allowlist is deliberately NOT applied: assistant text is model output, and
-  // a model discussing configuration legitimately writes `<env>` (#720).
-  if (typeof content === "string") return sanitizeAssistantText(content)
-  if (!Array.isArray(content)) return String(content ?? "")
-  return content
-    .map((b: any) => (b?.type === "text" && b.text ? sanitizeAssistantText(b.text) : ""))
-    .filter(Boolean)
-    .join("\n")
-}
-
 /**
  * Flatten a user message's content to plain text for replay.
  *
@@ -425,9 +374,9 @@ function flattenAssistantContent(content: any): string {
  * a natural "here's the output" user turn instead of verbose
  * `[Tool Result for toolu_xxx: ...]` noise (issue #111, #386). When a
  * toolIndex is provided, each result is prefixed with a compact
- * `[name target]` attribution: the replay drops assistant tool_use blocks,
- * so without this the model sees raw outputs with no cause and denies having
- * made the calls at all (#552 — "a file I never created").
+ * `[name target]` attribution alongside the exact assistant call records,
+ * so the model can connect results to the completed calls in replay context.
+ * Exact call identity and error status accompany that compact attribution.
  */
 function flattenUserContent(
   content: any,
@@ -441,7 +390,7 @@ function flattenUserContent(
       if (b?.type === "text" && b.text) return sanitizeTextContent(b.text, sanitizeOpts)
       if (b?.type === "tool_result") {
         const info = toolIndex?.get(b.tool_use_id)
-        const label = info ? describeToolCall(info) : undefined
+        const label = replayToolResultHeader(b, info)
         const inner = b.content
         let flat = ""
         if (typeof inner === "string") flat = inner
@@ -485,8 +434,7 @@ function buildFreshPrompt(
           parent_tool_use_id: null,
         })
       } else {
-        // Drops tool_use blocks and skips tool-use-only assistant messages
-        // (flattenAssistantContent returns "" for those).
+        // Preserve assistant text and completed tool calls as replay context.
         const assistantText = flattenAssistantContent(m.content)
         if (assistantText) {
           structured.push({
@@ -498,7 +446,7 @@ function buildFreshPrompt(
       }
     }
     // See #553 — consolidate earlier-turn multimodal onto the final user turn.
-    const prompt = structured.length > 1 ? consolidateMultimodalOntoLastUser(structured) : structured
+    const prompt = frameStructuredReplay(structured, messages.at(-1)?.role === "user")
     return (async function* () { for (const msg of prompt) yield msg })()
   }
 
@@ -2574,7 +2522,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // a fork file. This closes the crash window where the SDK file exists
         // but no emitted event or shared mapping names it yet.
         managedForkSource = await registerLiveTranscript(managedForkSource, sessionGcOptions)
-        managedForkTarget = await prepareFork(managedForkTarget, sessionGcOptions)
+        managedForkTarget = await prepareForkForPublication(managedForkTarget, sessionGcOptions)
         claudeLog("session.fork_prepared", {
           sourceSessionId: managedForkSource.sessionId,
           targetSessionId: managedForkTarget.sessionId,
@@ -2602,7 +2550,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         managedForkTarget = transcriptLocator(randomUUID())
         managedFreshTarget = true
         releaseManagedForkPins = pinActiveSessionGcLocators(managedForkTarget)
-        managedForkTarget = await prepareFork(managedForkTarget, sessionGcOptions)
+        managedForkTarget = await prepareForkForPublication(managedForkTarget, sessionGcOptions)
         claudeLog("session.fresh_prepared", { targetSessionId: managedForkTarget.sessionId })
       }
 
@@ -2667,8 +2615,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 parent_tool_use_id: null,
               })
             } else {
-              // Drops tool_use blocks and skips tool-use-only assistant messages
-              // (flattenAssistantContent returns "" for those).
+              // Preserve assistant text and completed tool calls as replay context.
               const assistantText = flattenAssistantContent(m.content)
               if (assistantText) {
                 structuredMessages.push({
@@ -2686,7 +2633,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // result mid-conversation) are otherwise dropped and the model replies
         // "I cannot see the image" (#553). Move them onto the final user turn.
         if (structuredMessages.length > 1) {
-          structuredMessages = consolidateMultimodalOntoLastUser(structuredMessages)
+          structuredMessages = isResume
+            ? consolidateMultimodalOntoLastUser(structuredMessages)
+            : frameStructuredReplay(structuredMessages, messagesToConvert.at(-1)?.role === "user")
         }
 
       } else {
@@ -5214,7 +5163,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   recoveryForkTarget = transcriptLocator(randomUUID())
                   releaseRecoveryForkPins = pinActiveSessionGcLocators(recoveryForkSource, recoveryForkTarget)
                   recoveryForkSource = await registerLiveTranscript(recoveryForkSource, sessionGcOptions)
-                  recoveryForkTarget = await prepareFork(recoveryForkTarget, sessionGcOptions)
+                  recoveryForkTarget = await prepareForkForPublication(recoveryForkTarget, sessionGcOptions)
                   try {
                   // Protect recovery parallel calls with the same deny hold as
                   // the main stream. Producer hooks can run before the first

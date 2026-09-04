@@ -21,6 +21,32 @@ curl -s http://127.0.0.1:3456/health | jq .status   # → "healthy"
 kill $(lsof -ti :3456)
 ```
 
+### Fresh replay with completed tool calls (#888 / #858)
+
+```bash
+bun scripts/e2e-replay-tool-history.mjs
+bun scripts/e2e-replay-tool-history.mjs --stream
+bun scripts/e2e-replay-tool-history.mjs --image
+bun scripts/e2e-replay-tool-history.mjs --image --stream
+```
+
+This isolated real-SDK gate forces each round through a fresh replay. It expects
+exactly one price lookup, an answer containing the exact returned price and
+unique confirmation code, and (with `--image`) correct identification of the
+image color. Supported `getSessionMessages` inspection verifies that completed
+call identities and arguments, result payloads, and images survive, and no
+unpaired native `tool_result` blocks enter a fresh SDK session. Fresh SDK queries
+accept user input only, so completed assistant calls are explicit replay context;
+native result wrappers remain reserved for real SDK tool checkpoints. A fresh
+multimodal replay is delivered in one SDK input so generation cannot begin
+before the final result arrives.
+
+Run these four modes with both the default Haiku and `E2E_MODEL=sonnet`.
+Also run `E2E_MODEL=sonnet bun scripts/e2e-replay-tool-history.mjs --image --no-preset`
+to verify the Claude Code preset remains optional. Meridian
+state is isolated in a temporary directory while the existing SDK auth is kept.
+Also run all four E41 modes to validate normal checkpoint resumes after changes.
+
 ## Test Index
 
 | ID | Section | What It Proves | Verified |
@@ -3653,3 +3679,9 @@ Run this real-client sequence:
 `EXACTUNDO`, `EXACTFORK`, `EXACTORIGINAL`,
 `EXACTPARALLEL[ALPHA,BRAVO]`, and `EXACTAFTERCOMPACT`. The binary SHA-256 stayed
 unchanged through the matrix.
+
+## Concurrent transcript publication
+
+Run `bun scripts/e2e-publication-lifetime.mjs` and again with `--stream` after lifecycle or publication changes. This gate uses real Claude Max queries and two concurrent HTTP conversations, each with a fresh and resumed turn. A timing hook pauses each request after its real SDK writer lease is released, promotes its request pin as the owning proxy would, and runs a separate collector process before publication. The collector uses zero grace periods and the supported SDK deleter, exercising the destructive race in an isolated session store and disposable project.
+
+Require four successful competing sweeps with no deletions, correct fixture identifiers in both answers, valid response envelopes, durable mappings, and unchanged source transcripts inspected through `getSessionMessages`. To verify rolling upgrades, set `E2E_COLLECTOR_MODULE` to the absolute `src/proxy/sessionLifecycle.ts` path in the previous checkout and repeat. The SDK itself is not mocked.
