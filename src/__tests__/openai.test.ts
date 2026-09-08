@@ -1429,12 +1429,12 @@ describe("buildModelList", () => {
     expect(ids).toContain("claude-opus-4-8")
   })
 
-  it("Max subscription gets 1M context for every Fable version, 200k otherwise", () => {
+  it("Max subscription gets 1M for every Fable version; current Fable stays 1M otherwise", () => {
     for (const id of ["claude-fable-5-1", "claude-fable-5"]) {
       const fableMax = buildModelList(true).find(m => m.id === id)!
       const fableFree = buildModelList(false).find(m => m.id === id)!
       expect(fableMax.context_window).toBe(1_000_000)
-      expect(fableFree.context_window).toBe(200_000)
+      expect(fableFree.context_window).toBe(id === "claude-fable-5" ? 1_000_000 : 200_000)
     }
   })
 
