@@ -164,15 +164,15 @@ describe("sdkFeatures config roundtrip", () => {
     expect(config).toEqual({})
   })
 
-  it("uses XDG_CONFIG_HOME for persisted adapter overrides", () => {
-    const savedConfigHome = process.env.XDG_CONFIG_HOME
-    process.env.XDG_CONFIG_HOME = tempDir
+  it("uses MERIDIAN_CONFIG_DIR for persisted adapter overrides", () => {
+    const savedConfigDir = process.env.MERIDIAN_CONFIG_DIR
+    process.env.MERIDIAN_CONFIG_DIR = tempDir
 
     try {
       updateAdapterFeatures("opencode", { codeSystemPrompt: false })
 
       const loaded = getFeaturesForAdapter("opencode")
-      const configPath = join(tempDir, "meridian", "sdk-features.json")
+      const configPath = join(tempDir, "sdk-features.json")
 
       expect(loaded.codeSystemPrompt).toBe(false)
       expect(existsSync(configPath)).toBe(true)
@@ -180,8 +180,8 @@ describe("sdkFeatures config roundtrip", () => {
         opencode: { codeSystemPrompt: false },
       })
     } finally {
-      if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
-      else process.env.XDG_CONFIG_HOME = savedConfigHome
+      if (savedConfigDir === undefined) delete process.env.MERIDIAN_CONFIG_DIR
+      else process.env.MERIDIAN_CONFIG_DIR = savedConfigDir
     }
   })
 })
