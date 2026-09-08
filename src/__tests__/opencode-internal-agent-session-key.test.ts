@@ -19,8 +19,8 @@
  * non-retryable; before #825 it fell through to a full-history replay against
  * a cold prompt cache.
  *
- * Scoping the key by agent gives every non-primary agent its own lineage and
- * its own lease, so neither outcome is reachable.
+ * Scoping known internal agents and all subagents gives each its own lineage
+ * and lease, so neither outcome is reachable.
  */
 import { describe, it, expect } from "bun:test"
 import { openCodeAdapter } from "../proxy/adapters/opencode"
@@ -48,22 +48,22 @@ describe("openCodeAdapter.getSessionId — internal agent isolation", () => {
     }))
     const title = openCodeAdapter.getSessionId(ctx({
       "x-opencode-session": SESSION,
-      "x-opencode-agent-mode": "subagent",
+      "x-opencode-agent-mode": "primary",
       "x-opencode-agent-name": "title",
     }))
     expect(title).toBeDefined()
     expect(title).not.toBe(primary)
   })
 
-  it("separates distinct non-primary agents from each other", () => {
+  it("separates distinct internal agents from each other", () => {
     const title = openCodeAdapter.getSessionId(ctx({
       "x-opencode-session": SESSION,
-      "x-opencode-agent-mode": "subagent",
+      "x-opencode-agent-mode": "primary",
       "x-opencode-agent-name": "title",
     }))
     const summary = openCodeAdapter.getSessionId(ctx({
       "x-opencode-session": SESSION,
-      "x-opencode-agent-mode": "subagent",
+      "x-opencode-agent-mode": "primary",
       "x-opencode-agent-name": "summary",
     }))
     expect(title).not.toBe(summary)
@@ -81,7 +81,7 @@ describe("openCodeAdapter.getSessionId — internal agent isolation", () => {
   it("falls back to x-session-affinity and still scopes by agent", () => {
     expect(openCodeAdapter.getSessionId(ctx({
       "x-session-affinity": SESSION,
-      "x-opencode-agent-mode": "subagent",
+      "x-opencode-agent-mode": "primary",
       "x-opencode-agent-name": "title",
     }))).not.toBe(SESSION)
   })

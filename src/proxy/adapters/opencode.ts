@@ -16,6 +16,8 @@ import { buildAgentDefinitionsFromTool, mapModelTier } from "../agentDefs"
 import { fuzzyMatchAgentName } from "../agentMatch"
 import { resolvePassthrough } from "../../env"
 
+const OPENCODE_INTERNAL_AGENT_NAMES = new Set(["title", "summary"])
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -102,10 +104,10 @@ export const openCodeAdapter: AgentAdapter = {
    * HTTP 400 `session_turn_conflict` since #825, and before that replayed in
    * full against a cold prompt cache.
    *
-   * Scoping by agent gives every non-primary agent its own lineage and lease.
-   * The primary agent's key is deliberately left byte-identical to the raw
-   * header so existing conversations, the shared session store, and the
-   * `x-opencode-session` contract are unaffected.
+   * Scoping known internal agents and all subagents gives each its own lineage
+   * and lease. The ordinary primary agent's key is deliberately left
+   * byte-identical to the raw header so existing conversations, the shared
+   * session store, and the `x-opencode-session` contract are unaffected.
    *
    * Real task-tool subagents are scoped too, which is strictly better than the
    * status quo: they also carried the parent's key, so their turns and the
@@ -114,14 +116,16 @@ export const openCodeAdapter: AgentAdapter = {
   getSessionId(c: Context): string | undefined {
     const base = c.req.header("x-opencode-session") ?? c.req.header("x-session-affinity")
     if (!base) return undefined
-    // Only non-primary agents are scoped, and only when the plugin says so.
+    // NOTE: OpenCode reports its title, summary, and compaction agents as
+    // primary even though their histories are independent of the user's chat.
     // Inferring the agent from the request's shape was tried and reverted: the
     // only available signal — a tool-less single-message conversation — is also
     // the first turn of an ordinary tool-less chat, so scoping on it broke
     // resume for those on turn 2 (5 suites red, incl. session-lineage's strict
     // continuation). A plugin too old to send the name gets today's behavior.
-    if (c.req.header("x-opencode-agent-mode") !== "subagent") return base
     const agent = c.req.header("x-opencode-agent-name")?.trim()
+    const isInternalAgent = agent !== undefined && OPENCODE_INTERNAL_AGENT_NAMES.has(agent.toLowerCase())
+    if (c.req.header("x-opencode-agent-mode") !== "subagent" && !isInternalAgent) return base
     return agent ? `${base}#${agent}` : base
   },
 
