@@ -1172,8 +1172,6 @@ export function buildModelList(
       context_window: maxExtendedContextWindow,
       capabilities: FULL_CAPABILITIES,
     },
-      capabilities: FULL_CAPABILITIES,
-    },
     {
       id: "claude-haiku-4-5",
       object: "model",
