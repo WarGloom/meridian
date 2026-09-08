@@ -235,14 +235,14 @@ describe("buildQueryOptions", () => {
     // Client system text is carried in the prompt because large SDK systemPrompt
     // values can be rejected by the Claude subscription transport. Meridian's
     // own preset addenda still use append.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
-  it("uses raw system prompt in passthrough mode", () => {
+  it("preserves the SDK preset in passthrough mode", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(sp).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
     expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
@@ -265,7 +265,7 @@ describe("buildQueryOptions", () => {
     }))
     const sp = (result.options as any).systemPrompt
     expect((result.options as any).resume).toBe("sdk-123")
-    expect(sp).toBeUndefined()
+    expect(sp).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
     expect(result.prompt).not.toContain("<client-system-instructions>")
   })
 
@@ -288,7 +288,7 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPromptPlacement: "systemPrompt",
     }))
-    expect((result.options as any).systemPrompt).toBeUndefined()
+    expect((result.options as any).systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
     expect(result.prompt).not.toContain("<client-system-instructions>")
   })
 
@@ -301,7 +301,7 @@ describe("buildQueryOptions", () => {
       clientSystemPromptPlacement: "systemPrompt",
       repeatClientSystemPromptOnResume: true,
     }))
-    expect((result.options as any).systemPrompt).toBe("Agent instructions")
+    expect((result.options as any).systemPrompt).toBe("Agent instructions" + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).not.toContain("<client-system-instructions>")
   })
 
@@ -555,7 +555,7 @@ describe("buildQueryOptions", () => {
     // Client system text is carried in the prompt because large SDK systemPrompt
     // values can be rejected by the Claude subscription transport. Meridian's
     // own preset addenda still use append.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
@@ -571,7 +571,7 @@ describe("buildQueryOptions", () => {
     // Client system text is carried in the prompt because large SDK systemPrompt
     // values can be rejected by the Claude subscription transport. Meridian's
     // own preset addenda still use append.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).toContain("<client-system-instructions>\nBe helpful")
   })
 
@@ -775,7 +775,7 @@ describe("buildQueryOptions", () => {
     // Client system text is carried in the prompt because large SDK systemPrompt
     // values can be rejected by the Claude subscription transport. Meridian's
     // own preset addenda still use append.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
@@ -853,7 +853,7 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPrompt: true,
     }))
-    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
     expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
   })
 
@@ -870,7 +870,7 @@ describe("buildQueryOptions", () => {
     // Client system text is carried in the prompt because large SDK systemPrompt
     // values can be rejected by the Claude subscription transport. Meridian's
     // own preset addenda still use append.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
     expect(result.prompt).toContain("<client-system-instructions>\nAgent instructions")
     const opts = result.options as any
     expect(opts.settingSources).toEqual(["user", "project"])
