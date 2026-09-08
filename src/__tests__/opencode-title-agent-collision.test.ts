@@ -5,7 +5,7 @@
  * internal `title` agent concurrently with the user's first real turn, and both
  * carry the SAME session id:
  *
- *   seq 1  agent=title  mode=subagent  tools=0   msgs=1  x-opencode-session: ses_fe4b…
+ *   seq 1  agent=title  mode=primary   tools=0   msgs=1  x-opencode-session: ses_fe4b…
  *   seq 2  agent=build  mode=primary   tools=10  msgs=1  x-opencode-session: ses_fe4b…
  *
  * One key meant one lineage and one per-session turn lease. The title turn wins
@@ -133,10 +133,10 @@ async function post(app: any, body: any, headers: Record<string, string> = {}) {
 
 const SESSION = "ses_fe4bfa3daffexvfr3lL7db1lcU"
 
-/** OpenCode's internal title one-shot: no tools, one message, subagent mode. */
+/** OpenCode's internal title one-shot: no tools, one message, primary mode. */
 const TITLE_HEADERS = {
   "x-opencode-session": SESSION,
-  "x-opencode-agent-mode": "subagent",
+  "x-opencode-agent-mode": "primary",
   "x-opencode-agent-name": "title",
 }
 const TITLE_BODY = {
