@@ -779,7 +779,9 @@ describe("polytoken prompt defaults and overrides", () => {
       : String(Array.isArray(systemPrompt)
         ? (systemPrompt as Array<{ text?: string }>).map((p: any) => p.text ?? "").join("")
         : JSON.stringify(systemPrompt))
-    expect(promptText).toContain("You are the client's own agent.")
+    // The client's system text rides in the prompt, not the SDK systemPrompt:
+    // large systemPrompt values can be rejected by the subscription transport.
+    expect(captured[0]!.prompt).toContain("You are the client's own agent.")
     expect(promptText).not.toContain("Claude Code")
     expect(promptText).not.toContain("subagent_type")
     // No memory/settings injection surfaces.

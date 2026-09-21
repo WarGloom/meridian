@@ -74,7 +74,11 @@ function expectSafeFallbackTargets(reconciled: boolean) {
   expect(lifecycleBeforeSdkEvents.map((resource) => resource?.generation))
     .toEqual(lifecycleAtQuery.map((resource) => resource?.generation))
   if (reconciled) {
-    expect(lifecycleBeforeSdkEvents.map((resource) => resource?.state)).toEqual(["live", "live"])
+    // Reconciliation preserves a *pinned* prepared transcript instead of
+    // promoting it to live; retired targets are still rescued. Ownership,
+    // publication and generation (asserted above) are what make it safe.
+    expect(lifecycleBeforeSdkEvents.map((resource) => resource?.state))
+      .toEqual(lifecycleAtQuery.map((resource) => resource?.state))
   }
   const publishedIds = Object.values(readSessionStoreSnapshot()).map((entry) => entry.claudeSessionId)
   expect(publishedIds).toContain(expectedIds[1] ?? "missing")

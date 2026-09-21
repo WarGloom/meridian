@@ -47,6 +47,9 @@ async function request(app: App, session: string | undefined, stream: boolean, t
   return { status: response.status, error, raw }
 }
 
+// Meridian reports the idle-stall verdict to clients as "timeout_error": the
+// internal "upstream_timeout" verdict type is not part of Anthropic's public
+// error union, and clients reject unknown types (see server.ts).
 describe("HTTP idle retry ceiling", () => {
   beforeEach(() => { stalled = true; queries = 0; clearSessionCache() })
 
@@ -55,7 +58,7 @@ describe("HTTP idle retry ceiling", () => {
     const session = crypto.randomUUID()
     for (let attempt = 1; attempt <= 3; attempt++) {
       const result = await request(app, session, stream)
-      expect(result.error?.type).toBe(attempt < 3 ? "upstream_timeout" : "invalid_request_error")
+      expect(result.error?.type).toBe(attempt < 3 ? "timeout_error" : "invalid_request_error")
     }
     expect(queries).toBe(3)
     const blocked = await request(app, session, stream)
@@ -76,7 +79,7 @@ describe("HTTP idle retry ceiling", () => {
     expect(queries).toBe(4)
     stalled = true
     const retry = await request(app, session, stream)
-    expect(retry.error?.type).toBe("upstream_timeout")
+    expect(retry.error?.type).toBe("timeout_error")
     expect(queries).toBe(5)
   })
 
@@ -84,9 +87,9 @@ describe("HTTP idle retry ceiling", () => {
     const { app } = createProxyServer({ port: 0, host: "127.0.0.1", silent: true })
     const session = crypto.randomUUID()
     for (let attempt = 0; attempt < 3; attempt++) await request(app, session, true)
-    expect((await request(app, crypto.randomUUID(), true)).error?.type).toBe("upstream_timeout")
+    expect((await request(app, crypto.randomUUID(), true)).error?.type).toBe("timeout_error")
     for (let attempt = 0; attempt < 4; attempt++) {
-      expect((await request(app, undefined, true)).error?.type).toBe("upstream_timeout")
+      expect((await request(app, undefined, true)).error?.type).toBe("timeout_error")
     }
   })
 
@@ -94,6 +97,6 @@ describe("HTTP idle retry ceiling", () => {
     const { app } = createProxyServer({ port: 0, host: "127.0.0.1", silent: true })
     const session = crypto.randomUUID()
     for (let attempt = 0; attempt < 3; attempt++) await request(app, session, true)
-    expect((await request(app, session, true, "hello", "sonnet")).error?.type).toBe("upstream_timeout")
+    expect((await request(app, session, true, "hello", "sonnet")).error?.type).toBe("timeout_error")
   })
 })
