@@ -7415,7 +7415,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const classified = requestAbort.controller.signal.aborted
           ? { status: 499, type: "request_cancelled", message: "The request was cancelled" }
           : error instanceof IdleStallCeilingError
-            ? error.verdict
+            ? {
+                ...error.verdict,
+                // Same public-union constraint as the SSE path below: clients
+                // reject the internal "upstream_timeout" verdict type.
+                type: error.verdict.type === "upstream_timeout" ? "timeout_error" : error.verdict.type,
+              }
             : classifyError(errMsg)
 
         // Non-streaming failures still own their headers here, so the hint goes
