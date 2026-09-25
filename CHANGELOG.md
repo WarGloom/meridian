@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.77.0](https://github.com/rynfar/meridian/compare/meridian-v1.76.6...meridian-v1.77.0) (2026-09-25)
+
+
+### Features
+
+* preserve Letta conversation identity ([#1113](https://github.com/rynfar/meridian/issues/1113)) ([aedb9b2](https://github.com/rynfar/meridian/commit/aedb9b2506cd50449a4d000fb3a8e09a7fcb5451))
+
+
+### Bug Fixes
+
+* attribute replayed media to prior turns ([#1156](https://github.com/rynfar/meridian/issues/1156)) ([16834f2](https://github.com/rynfar/meridian/commit/16834f253ef61b0aa36bd9211537ddc63de149ab))
+
 ## [1.76.6](https://github.com/rynfar/meridian/compare/meridian-v1.76.5...meridian-v1.76.6) (2026-09-25)
 
 
