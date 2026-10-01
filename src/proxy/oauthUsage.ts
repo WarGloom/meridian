@@ -27,7 +27,7 @@ import { z } from "zod"
 import { claudeLog } from "../logger"
 import { isCredentialsReadOnly } from "./credentialsMode"
 import { parseRetryAfterMs } from "./retryAfter"
-import { createPlatformCredentialStore, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
+import { createPlatformCredentialStore, readUsageCredentials, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
 import { bundledClaudeCodeVersion } from "./models"
 
 // Policy for the query flag and User-Agent: profiles-routing.spec.md, "OAuth usage request identity".
@@ -258,6 +258,29 @@ const rateLimitRunByProfile = new Map<string, { tokenHash: string; count: number
 const lastRateLimitRefreshAtByProfile = new Map<string, number>()
 const DEFAULT_KEY = "__default__"
 
+type UnavailableReason = "no_credentials" | "http_error" | "rate_limited" | "network_error" | "parse_error" | "credential_error"
+type UnavailableDiagnostic = { reason: UnavailableReason; httpStatus?: number }
+const unavailableByProfile = new Map<string, UnavailableDiagnostic>()
+
+function logUnavailable(cacheKey: string, diagnostic: UnavailableDiagnostic): void {
+  diagnostic = {
+    reason: diagnostic.reason,
+    ...(typeof diagnostic.httpStatus === "number" && Number.isInteger(diagnostic.httpStatus)
+      && diagnostic.httpStatus >= 100 && diagnostic.httpStatus <= 599
+      ? { httpStatus: diagnostic.httpStatus } : {}),
+  }
+  const previous = unavailableByProfile.get(cacheKey)
+  if (previous?.reason === diagnostic.reason && previous.httpStatus === diagnostic.httpStatus) return
+  unavailableByProfile.set(cacheKey, diagnostic)
+  // Only fixed reasons and numeric statuses: profile IDs and exception messages
+  // can contain emails or credentials. Do not pass them to either log sink.
+  console.warn(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
+}
+
+function logRecovered(cacheKey: string): void {
+  if (unavailableByProfile.delete(cacheKey)) console.warn("[PROXY] oauth_usage.recovered")
+}
+
 function recordFailure(cacheKey: string, reason: OAuthUsageError): void {
   const prev = failureByProfile.get(cacheKey)
   failureByProfile.set(cacheKey, {
@@ -396,9 +419,12 @@ function buildSnapshot(raw: RawOAuthUsageResponse): OAuthUsageSnapshot {
   return { windows, extraUsage, bankedResets: parseBankedResets(raw.cedar_ember), fetchedAt: Date.now() }
 }
 
-async function readAccessToken(store: CredentialStore): Promise<string | null> {
-  const creds = await store.read()
-  return creds?.claudeAiOauth?.accessToken ?? null
+async function readAccessToken(store: CredentialStore): Promise<{ token: string | null; failed: boolean }> {
+  const result = await readUsageCredentials(store)
+  return {
+    token: result.status === "ok" ? result.credentials?.claudeAiOauth?.accessToken ?? null : null,
+    failed: result.status === "error",
+  }
 }
 
 type RefreshFn = (store: CredentialStore) => Promise<boolean>
@@ -406,7 +432,7 @@ type RefreshFn = (store: CredentialStore) => Promise<boolean>
 /** Refresh, then read back the new token. Null when either step fails. */
 async function refreshAndRead(store: CredentialStore, refresh: RefreshFn, cacheKey: string, trigger: string): Promise<string | null> {
   if (await refresh(store)) {
-    const token = await readAccessToken(store)
+    const { token } = await readAccessToken(store)
     if (token) return token
   }
   claudeLog("oauth_usage.refresh_failed", { profile: cacheKey, trigger })
@@ -421,14 +447,16 @@ async function refreshAndRead(store: CredentialStore, refresh: RefreshFn, cacheK
  * Read-only instances skip this quietly, as `ensureFreshToken` does: it runs
  * on every check, and the instance that owns the credentials renews them.
  */
-async function tokenForCall(store: CredentialStore, refresh: RefreshFn, cacheKey: string): Promise<string | null> {
-  const oauth = (await store.read())?.claudeAiOauth
+async function tokenForCall(store: CredentialStore, refresh: RefreshFn, cacheKey: string): Promise<{ token: string | null; failed: boolean }> {
+  const result = await readUsageCredentials(store)
+  const failed = result.status === "error"
+  const oauth = result.status === "ok" ? result.credentials?.claudeAiOauth : undefined
   const token = oauth?.accessToken ?? null
   const expiresAt = oauth?.expiresAt
-  if (!token || typeof expiresAt !== "number" || expiresAt - Date.now() > EXPIRY_REFRESH_MARGIN_MS) return token
-  if (isCredentialsReadOnly()) return token
+  if (!token || typeof expiresAt !== "number" || expiresAt - Date.now() > EXPIRY_REFRESH_MARGIN_MS) return { token, failed }
+  if (isCredentialsReadOnly()) return { token, failed }
   claudeLog("oauth_usage.refresh_on_expiry", { profile: cacheKey })
-  return (await refreshAndRead(store, refresh, cacheKey, "expiry")) ?? token
+  return { token: (await refreshAndRead(store, refresh, cacheKey, "expiry")) ?? token, failed }
 }
 
 /** Count a 429 against the token that drew it. A new token starts a new run. */
@@ -458,7 +486,7 @@ async function callAnthropic(
   token: string,
   fetchImpl: FetchLike,
   signal?: AbortSignal,
-): Promise<RawOAuthUsageResponse | { __status: number; retryAfterMs: number | null }> {
+): Promise<RawOAuthUsageResponse | { __status: number; retryAfterMs: number | null } | { __parseError: true }> {
   const res = await fetchImpl(OAUTH_USAGE_URL, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -474,7 +502,14 @@ async function callAnthropic(
       retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
     }
   }
-  return (await res.json()) as RawOAuthUsageResponse
+  try {
+    const raw: unknown = await res.json()
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)
+      || "__status" in raw || "__parseError" in raw) return { __parseError: true }
+    return raw as RawOAuthUsageResponse
+  } catch {
+    return { __parseError: true }
+  }
 }
 
 type UsageCallResult = Awaited<ReturnType<typeof callAnthropic>>
@@ -588,7 +623,8 @@ export async function redeemOAuthQuotaReset(
   const store = opts?.store ?? createPlatformCredentialStore({ claudeConfigDir: opts?.claudeConfigDir })
   let token: string | null
   try {
-    token = await tokenForCall(store, opts?.refreshImpl ?? refreshOAuthToken, opts?.profileId ?? DEFAULT_KEY)
+    const call = await tokenForCall(store, opts?.refreshImpl ?? refreshOAuthToken, opts?.profileId ?? DEFAULT_KEY)
+    token = call.token
   } catch {
     return fail(503, "no_token", "Could not read OAuth credentials")
   }
@@ -777,6 +813,7 @@ export async function fetchOAuthUsageResult(opts?: FetchOAuthUsageOpts): Promise
     const snapshot = await _testOverride(opts)
     if (snapshot) {
       failureByProfile.delete(cacheKey)
+      if (!snapshot.stale) logRecovered(cacheKey)
       return withProvenance(cacheKey, { snapshot, error: null })
     }
     // The override returns a bare snapshot-or-null, so the reason has to come
@@ -785,6 +822,9 @@ export async function fetchOAuthUsageResult(opts?: FetchOAuthUsageOpts): Promise
     // cooldown the same process just recorded.
     const error = missingReason(cacheKey)
     recordFailure(cacheKey, error)
+    logUnavailable(cacheKey, error === "rate_limited"
+      ? { reason: "rate_limited", httpStatus: 429 }
+      : { reason: "no_credentials" })
     return withProvenance(cacheKey, { snapshot: null, error })
   }
   return withProvenance(cacheKey, await fetchOAuthUsageImpl(opts))
@@ -803,14 +843,22 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   // `attempted` marks a check that actually reached the credential store or
   // upstream. The 429 cooldown turns polls away before either, and those must
   // not advance the failure count — see OAuthUsageFailure.
-  const staleOr = (reason: string, error: OAuthUsageError, attempted = true): RawUsageResult | Promise<RawUsageResult> => {
+  const staleOr = (
+    reason: string,
+    error: OAuthUsageError,
+    attempted = true,
+    diagnostic: UnavailableDiagnostic = error === "rate_limited"
+      ? { reason: "rate_limited", httpStatus: 429 }
+      : { reason: "no_credentials" },
+  ): RawUsageResult | Promise<RawUsageResult> => {
     if (attempted && inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
     if (attempted) recordFailure(cacheKey, error)
     const last = cacheByProfile.get(cacheKey)
     if (last && Date.now() - last.fetchedAt < staleMaxMs) {
-      claudeLog("oauth_usage.serving_stale", { profile: cacheKey, reason, ageMs: Date.now() - last.fetchedAt })
+      claudeLog("oauth_usage.serving_stale", { reason, ageMs: Date.now() - last.fetchedAt })
       return { snapshot: { ...last, stale: true }, error: null }
     }
+    logUnavailable(cacheKey, diagnostic)
     return { snapshot: null, error }
   }
 
@@ -835,35 +883,43 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   const refresh = opts?.refreshImpl ?? refreshOAuthToken
 
   async function fetchAndCacheUsage(): Promise<RawUsageResult> {
+    let failureReason: UnavailableReason = "credential_error"
     try {
-      let token = await tokenForCall(store, refresh, cacheKey)
+      const call = await tokenForCall(store, refresh, cacheKey)
+      let token = call.token
+      const failed = call.failed
       if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
       if (!token) {
         // This read failing intermittently (e.g. a Keychain entry racing a
         // token-refresh rewrite) was previously silent — log it so flapping
         // usage displays are diagnosable.
-        claudeLog("oauth_usage.no_token", { profile: cacheKey })
-        return staleOr("no_token", "no_token")
+        claudeLog("oauth_usage.no_token")
+        return staleOr("no_token", "no_token", true, { reason: failed ? "credential_error" : "no_credentials" })
       }
 
+      failureReason = "network_error"
       let result = await callAnthropic(token, fetchImpl)
       if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
       if ("__status" in result && result.__status === 401) {
         claudeLog("oauth_usage.token_refresh_attempt", { profile: cacheKey })
+        failureReason = "credential_error"
         const refreshed = await refresh(store)
         if (!refreshed) {
-          claudeLog("oauth_usage.refresh_failed", { profile: cacheKey })
+          claudeLog("oauth_usage.refresh_failed")
           // Not `no_token`: the token is present, and a read-only instance
           // declines to refresh it BY DESIGN (credentialsMode.ts). Reporting
           // a missing login here would tell the operator to re-authenticate
           // every account on the box, on the one instance that is forbidden
           // from touching credentials.
-          return staleOr("refresh_failed", "upstream_error")
+          return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
         }
-        const newToken = await readAccessToken(store)
+        const { token: newToken, failed: newReadFailed } = await readAccessToken(store)
         if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
-        if (!newToken) return staleOr("no_token_after_refresh", "no_token")
+        if (!newToken) return staleOr("no_token_after_refresh", "no_token", true, {
+          reason: newReadFailed ? "credential_error" : "no_credentials",
+        })
         token = newToken
+        failureReason = "network_error"
         result = await callAnthropic(newToken, fetchImpl)
       }
       if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
@@ -889,21 +945,29 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
           )
           rateLimitedUntilByProfile.set(cacheKey, Date.now() + retryAfterMs)
         }
-        claudeLog("oauth_usage.upstream_error", { profile: cacheKey, status: result.__status })
+        claudeLog("oauth_usage.upstream_error", { status: result.__status })
         return staleOr(
           `upstream_${result.__status}`,
           result.__status === 429 ? "rate_limited" : "upstream_error",
+          true,
+          { reason: result.__status === 429 ? "rate_limited" : "http_error", httpStatus: result.__status },
         )
       }
 
+      if ("__parseError" in result) {
+        return staleOr("parse_error", "upstream_error", true, { reason: "parse_error" })
+      }
+
+      failureReason = "parse_error"
+      const snapshot = buildSnapshot(result)
       rateLimitedUntilByProfile.delete(cacheKey)
       failureByProfile.delete(cacheKey)
-      const snapshot = buildSnapshot(result)
       cacheByProfile.set(cacheKey, snapshot)
+      logRecovered(cacheKey)
       return { snapshot, error: null }
-    } catch (err) {
-      claudeLog("oauth_usage.fetch_failed", { profile: cacheKey, error: err instanceof Error ? err.message : String(err) })
-      return staleOr("exception", "upstream_error")
+    } catch {
+      claudeLog("oauth_usage.fetch_failed", { reason: failureReason })
+      return staleOr("exception", "upstream_error", true, { reason: failureReason })
     } finally {
       if (inflightByProfile.get(cacheKey) === promise) inflightByProfile.delete(cacheKey)
     }
@@ -948,4 +1012,5 @@ export function resetOAuthUsageCache(): void {
   lastRateLimitRefreshAtByProfile.clear()
   resetInflightByScope.clear()
   resetLedger.clear()
+  unavailableByProfile.clear()
 }
