@@ -689,9 +689,13 @@ describe("OAuth availability diagnostics", () => {
     expect(await fetchOAuthUsage(opts)).toBeNull()
     expect(await fetchOAuthUsage(opts)).not.toBeNull()
     await fetchOAuthUsage(opts)
-    expect(recoveries.mock.calls).toEqual([["[PROXY] oauth_usage.recovered"]])
+    expect(warnings.mock.calls).toEqual([
+      ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":500}'],
+      ["[PROXY] oauth_usage.recovered"],
+    ])
+    expect(recoveries).not.toHaveBeenCalled()
     await fetchOAuthUsage({ ...opts, staleMaxMs: 0 })
-    expect(warnings).toHaveBeenCalledTimes(2)
+    expect(warnings).toHaveBeenCalledTimes(3)
   })
 
   test("does not report stale fallback as recovery or unavailable", async () => {
@@ -735,5 +739,104 @@ describe("OAuth availability diagnostics", () => {
       store: makeStore("fake-token"), fetchImpl: fixedFetch(() => new Response(JSON.stringify(SAMPLE_RESPONSE))),
     })
     expect(Object.keys(snapshot!).sort()).toEqual(["extraUsage", "fetchedAt", "windows"])
+  })
+
+  test.each(["__status", "__parseError"])("rejects reserved upstream JSON key %s", async (key) => {
+    const result = await fetchOAuthUsageResult({
+      store: makeStore("fake-token"),
+      fetchImpl: fixedFetch(() => new Response(JSON.stringify({ ...SAMPLE_RESPONSE, [key]: 503 }))),
+    })
+    expect(result.snapshot).toBeNull()
+    expect(result.error).toBe("upstream_error")
+    expect(warnings.mock.calls).toEqual([['[PROXY] oauth_usage.unavailable {"reason":"parse_error"}']])
+  })
+
+  test.each([NaN, Infinity, 500.5, 99, 600, "private-status"])("omits invalid HTTP status %s", async (status) => {
+    const result = await fetchOAuthUsage({
+      store: makeStore("fake-token"),
+      fetchImpl: fixedFetch(() => Object.defineProperty(new Response("unavailable", { status: 500 }), "status", { value: status })),
+    })
+    expect(result).toBeNull()
+    expect(warnings.mock.calls).toEqual([['[PROXY] oauth_usage.unavailable {"reason":"http_error"}']])
+  })
+
+  test("a warned profile served stale data only recovers on fresh success", async () => {
+    const { fetchImpl } = countingFetch(calls => calls === 2 || calls === 3
+      ? new Response("unavailable", { status: 503 })
+      : new Response(JSON.stringify(SAMPLE_RESPONSE)))
+    const opts = { force: true, store: makeStore("fake-token"), fetchImpl }
+    await fetchOAuthUsage(opts)
+    expect(await fetchOAuthUsage({ ...opts, staleMaxMs: 0 })).toBeNull()
+    expect((await fetchOAuthUsage(opts))?.stale).toBe(true)
+    expect(warnings).toHaveBeenCalledTimes(1)
+    await fetchOAuthUsage(opts)
+    await fetchOAuthUsage(opts)
+    expect(warnings.mock.calls).toEqual([
+      ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":503}'],
+      ["[PROXY] oauth_usage.recovered"],
+    ])
+    expect(recoveries).not.toHaveBeenCalled()
+  })
+
+  test("a throwing injected store logs credential_error without its exception text", async () => {
+    const secret = "fake-token user@example.invalid Authorization: private"
+    const store: CredentialStore = {
+      async read() { throw new Error(secret) },
+      async write() { return false },
+    }
+    const fetchImpl = fixedFetch(() => { throw new Error("must not fetch") })
+    const result = await fetchOAuthUsageResult({ store, fetchImpl })
+    await fetchOAuthUsage({ store, fetchImpl })
+    expect(result.snapshot).toBeNull()
+    expect(result.error).toBe("upstream_error")
+    expect(warnings.mock.calls).toEqual([['[PROXY] oauth_usage.unavailable {"reason":"credential_error"}']])
+    expect(JSON.stringify(warnings.mock.calls)).not.toContain(secret)
+  })
+
+  test.each([
+    ["darwin", "command_failure", "error", "credential_error"],
+    ["darwin", "item_not_found", "absent", "no_credentials"],
+    ["linux", "unreadable", "error", "credential_error"],
+    ["linux", "malformed", "error", "credential_error"],
+    ["linux", "file_not_found", "absent", "no_credentials"],
+  ])("production %s backend: %s", (platform, scenario, status, reason) => {
+    const moduleUrl = new URL("../proxy/tokenRefresh.ts", import.meta.url).href
+    const usageUrl = new URL("../proxy/oauthUsage.ts", import.meta.url).href
+    const script = `
+      import { mock } from "bun:test";
+      const os = await import("node:os");
+      const fs = await import("node:fs");
+      const cp = await import("node:child_process");
+      const scenario = ${JSON.stringify(scenario)};
+      const secret = "fake-token user@example.invalid Authorization: private";
+      mock.module("node:os", () => ({ ...os, platform: () => ${JSON.stringify(platform)}, homedir: () => "/test-home", userInfo: () => ({ username: "test-user" }) }));
+      mock.module("node:child_process", () => ({ ...cp, execFile: (...args) => {
+        const callback = args.at(-1);
+        callback(Object.assign(new Error(secret), { code: scenario === "item_not_found" ? 44 : 1 }));
+      }}));
+      mock.module("node:fs", () => ({ ...fs, existsSync: () => true, readFileSync: () => {
+        if (scenario === "malformed") return secret;
+        throw Object.assign(new Error(secret), { code: scenario === "file_not_found" ? "ENOENT" : "EACCES" });
+      }}));
+      const { createPlatformCredentialStore, readUsageCredentials } = await import(${JSON.stringify(moduleUrl)});
+      const { fetchOAuthUsageResult } = await import(${JSON.stringify(usageUrl)});
+      const store = createPlatformCredentialStore({ claudeConfigDir: "/test-profile" });
+      const publicRead = await store.read();
+      const outcome = await readUsageCredentials(store);
+      const opts = { store, fetchImpl: async () => { throw new Error("must not fetch"); } };
+      const result = await fetchOAuthUsageResult(opts);
+      await fetchOAuthUsageResult(opts);
+      console.log(JSON.stringify({ publicRead, status: outcome.status, snapshot: result.snapshot, error: result.error }));
+    `
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "-e", script],
+      env: { ...process.env, OPENCODE_CLAUDE_PROVIDER_DEBUG: "", MERIDIAN_CREDENTIALS_READONLY: "1" },
+      stdout: "pipe", stderr: "pipe",
+    })
+    expect(child.exitCode).toBe(0)
+    expect(JSON.parse(child.stdout.toString())).toEqual({ publicRead: null, status, snapshot: null, error: "no_token" })
+    expect(child.stderr.toString().trim()).toBe(`[PROXY] oauth_usage.unavailable ${JSON.stringify({ reason })}`)
+    expect(child.stderr.toString()).not.toContain("fake-token")
+    expect(child.stderr.toString()).not.toContain("user@example.invalid")
   })
 })

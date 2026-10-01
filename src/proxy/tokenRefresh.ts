@@ -16,7 +16,7 @@
 
 import { execFile as execFileCb } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir, platform, userInfo } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { promisify } from "node:util"
@@ -96,6 +96,18 @@ export interface CredentialStore {
   write(credentials: CredentialsFile): Promise<boolean>
 }
 
+type CredentialReadResult =
+  | { status: "ok"; credentials: CredentialsFile | null }
+  | { status: "absent" | "error" }
+
+const credentialReaders = new WeakMap<CredentialStore, () => Promise<CredentialReadResult>>()
+
+/** Usage diagnostics retain backend outcomes without changing the public store's read(). */
+export async function readUsageCredentials(store: CredentialStore): Promise<CredentialReadResult> {
+  const reader = credentialReaders.get(store)
+  return reader ? reader() : { status: "ok", credentials: await store.read() }
+}
+
 /**
  * Wrap a store so that, under MERIDIAN_CREDENTIALS_READONLY, `write()` refuses
  * and logs instead of touching the backend. Reads are untouched — re-reading
@@ -113,8 +125,11 @@ export interface CredentialStore {
  * write-failed path it already handles (`doRefresh` returns false, the CLI
  * prints its failure, callers fall back to the token on disk).
  */
-function guardCredentialWrites(store: CredentialStore): CredentialStore {
-  return {
+function guardCredentialWrites(
+  store: CredentialStore,
+  readResult?: () => Promise<CredentialReadResult>,
+): CredentialStore {
+  const guarded: CredentialStore = {
     ...store,
     async write(credentials) {
       if (isCredentialsReadOnly()) {
@@ -123,6 +138,8 @@ function guardCredentialWrites(store: CredentialStore): CredentialStore {
       return store.write(credentials)
     },
   }
+  if (readResult) credentialReaders.set(guarded, readResult)
+  return guarded
 }
 
 /**
@@ -167,24 +184,35 @@ function parseKeychainValue(raw: string): { credentials: CredentialsFile; wasHex
 const keychainWasHexByService = new Map<string, boolean>()
 
 function buildMacosStore(serviceName: string): CredentialStore {
+  const readResult = async (): Promise<CredentialReadResult> => {
+    try {
+      const { stdout } = await execFile(
+        "/usr/bin/security",
+        ["find-generic-password", "-s", serviceName, "-a", userInfo().username, "-w"],
+        { timeout: 5000 }
+      )
+      const parsed = parseKeychainValue(stdout)
+      if (!parsed) {
+        claudeLog("token_refresh.keychain_read_failed", { status: "error" })
+        return { status: "error" }
+      }
+      keychainWasHexByService.set(serviceName, parsed.wasHex)
+      return { status: "ok", credentials: parsed.credentials }
+    } catch (err) {
+      // security reports errSecItemNotFound (-25300) as the process exit code 44.
+      if (err !== null && typeof err === "object" && "code" in err && err.code === 44) {
+        return { status: "absent" }
+      }
+      claudeLog("token_refresh.keychain_read_failed", { status: "error" })
+      return { status: "error" }
+    }
+  }
   return guardCredentialWrites({
     refreshKey: `keychain:${serviceName}`,
 
     async read() {
-      try {
-        const { stdout } = await execFile(
-          "/usr/bin/security",
-          ["find-generic-password", "-s", serviceName, "-a", userInfo().username, "-w"],
-          { timeout: 5000 }
-        )
-        const parsed = parseKeychainValue(stdout)
-        if (!parsed) throw new Error("Could not parse keychain value as JSON or hex-encoded JSON")
-        keychainWasHexByService.set(serviceName, parsed.wasHex)
-        return parsed.credentials
-      } catch (err) {
-        claudeLog("token_refresh.keychain_read_failed", { service: serviceName, error: String(err) })
-        return null
-      }
+      const result = await readResult()
+      return result.status === "ok" ? result.credentials : null
     },
 
     async write(credentials) {
@@ -212,7 +240,7 @@ function buildMacosStore(serviceName: string): CredentialStore {
         return false
       }
     },
-  })
+  }, readResult)
 }
 
 const macosStore: CredentialStore = buildMacosStore(KEYCHAIN_SERVICE)
@@ -223,17 +251,23 @@ const macosStore: CredentialStore = buildMacosStore(KEYCHAIN_SERVICE)
 
 function buildFileStore(filePath: string): CredentialStore {
   const absPath = resolve(filePath)
+  const readResult = async (): Promise<CredentialReadResult> => {
+    try {
+      return { status: "ok", credentials: JSON.parse(readFileSync(absPath, "utf-8")) as CredentialsFile }
+    } catch (err) {
+      if (err !== null && typeof err === "object" && "code" in err && err.code === "ENOENT") {
+        return { status: "absent" }
+      }
+      claudeLog("token_refresh.file_read_failed", { status: "error" })
+      return { status: "error" }
+    }
+  }
   return guardCredentialWrites({
     refreshKey: `file:${absPath}`,
 
     async read() {
-      try {
-        if (!existsSync(absPath)) return null
-        return JSON.parse(readFileSync(absPath, "utf-8")) as CredentialsFile
-      } catch (err) {
-        claudeLog("token_refresh.file_read_failed", { path: absPath, error: String(err) })
-        return null
-      }
+      const result = await readResult()
+      return result.status === "ok" ? result.credentials : null
     },
 
     async write(credentials) {
@@ -247,7 +281,7 @@ function buildFileStore(filePath: string): CredentialStore {
         return false
       }
     },
-  })
+  }, readResult)
 }
 
 

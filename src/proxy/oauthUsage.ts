@@ -22,7 +22,7 @@
 
 import { claudeLog } from "../logger"
 import { parseRetryAfterMs } from "./retryAfter"
-import { createPlatformCredentialStore, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
+import { createPlatformCredentialStore, readUsageCredentials, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
 
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 const OAUTH_BETA_HEADER = "oauth-2025-04-20"
@@ -215,7 +215,7 @@ function logUnavailable(cacheKey: string, diagnostic: UnavailableDiagnostic): vo
 }
 
 function logRecovered(cacheKey: string): void {
-  if (unavailableByProfile.delete(cacheKey)) console.info("[PROXY] oauth_usage.recovered")
+  if (unavailableByProfile.delete(cacheKey)) console.warn("[PROXY] oauth_usage.recovered")
 }
 
 function recordFailure(cacheKey: string, reason: OAuthUsageError): void {
@@ -310,9 +310,12 @@ function buildSnapshot(raw: RawOAuthUsageResponse): OAuthUsageSnapshot {
   return { windows, extraUsage, fetchedAt: Date.now() }
 }
 
-async function readAccessToken(store: CredentialStore): Promise<string | null> {
-  const creds = await store.read()
-  return creds?.claudeAiOauth?.accessToken ?? null
+async function readAccessToken(store: CredentialStore): Promise<{ token: string | null; failed: boolean }> {
+  const result = await readUsageCredentials(store)
+  return {
+    token: result.status === "ok" ? result.credentials?.claudeAiOauth?.accessToken ?? null : null,
+    failed: result.status === "error",
+  }
 }
 
 /** Minimal fetch shape used by callAnthropic. Avoids `typeof fetch`'s
@@ -497,13 +500,13 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   const promise = (async () => {
     let failureReason: UnavailableReason = "credential_error"
     try {
-      const token = await readAccessToken(store)
+      const { token, failed } = await readAccessToken(store)
       if (!token) {
         // This read failing intermittently (e.g. a Keychain entry racing a
         // token-refresh rewrite) was previously silent — log it so flapping
         // usage displays are diagnosable.
         claudeLog("oauth_usage.no_token")
-        return staleOr("no_token", "no_token")
+        return staleOr("no_token", "no_token", true, { reason: failed ? "credential_error" : "no_credentials" })
       }
 
       failureReason = "network_error"
@@ -521,8 +524,10 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
           // from touching credentials.
           return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
         }
-        const newToken = await readAccessToken(store)
-        if (!newToken) return staleOr("no_token_after_refresh", "no_token")
+        const { token: newToken, failed: newReadFailed } = await readAccessToken(store)
+        if (!newToken) return staleOr("no_token_after_refresh", "no_token", true, {
+          reason: newReadFailed ? "credential_error" : "no_credentials",
+        })
         failureReason = "network_error"
         result = await callAnthropic(newToken, fetchImpl)
       }
