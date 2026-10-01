@@ -8,7 +8,7 @@
  * token-refresh.test.ts and other tests that swap globalThis.fetch.
  */
 
-import { describe, expect, test, beforeEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test"
 import { fetchOAuthUsage, fetchOAuthUsageResult, resetOAuthUsageCache, toUsageEntry } from "../proxy/oauthUsage"
 import type { CredentialStore } from "../proxy/tokenRefresh"
 
@@ -638,5 +638,102 @@ describe("toUsageEntry", () => {
     expect(entry.stale).toBe(true)
     expect(entry.error).toBe("upstream_error")
     expect(entry.failure?.consecutiveFailures).toBe(1)
+  })
+})
+
+describe("OAuth availability diagnostics", () => {
+  let warnings: ReturnType<typeof spyOn<typeof console, "warn">>
+  let recoveries: ReturnType<typeof spyOn<typeof console, "info">>
+
+  beforeEach(() => {
+    resetOAuthUsageCache()
+    warnings = spyOn(console, "warn").mockImplementation(() => {})
+    recoveries = spyOn(console, "info").mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    warnings.mockRestore()
+    recoveries.mockRestore()
+  })
+
+  test("logs missing credentials once per profile, not per poll", async () => {
+    const opts = { store: makeStore(null), fetchImpl: fixedFetch(() => new Response("{}")) }
+    await fetchOAuthUsage(opts)
+    await fetchOAuthUsage(opts)
+    expect(warnings.mock.calls).toEqual([
+      ['[PROXY] oauth_usage.unavailable {"reason":"no_credentials"}'],
+    ])
+    await fetchOAuthUsage({ ...opts, profileId: "other" })
+    expect(warnings).toHaveBeenCalledTimes(2)
+    expect(recoveries).not.toHaveBeenCalled()
+  })
+
+  test("logs HTTP reason/status changes once and preserves cooldown dedupe", async () => {
+    const { fetchImpl } = countingFetch(calls => new Response("private upstream body", {
+      status: calls <= 2 ? 500 : calls === 3 ? 503 : 429,
+    }))
+    const opts = { force: true, store: makeStore("fake-token"), fetchImpl }
+    for (let i = 0; i < 6; i++) await fetchOAuthUsage(opts)
+    expect(warnings.mock.calls).toEqual([
+      ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":500}'],
+      ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":503}'],
+      ['[PROXY] oauth_usage.unavailable {"reason":"rate_limited","httpStatus":429}'],
+    ])
+  })
+
+  test("logs recovery once after a successful fetch and allows a new failure", async () => {
+    const { fetchImpl } = countingFetch(calls => calls === 1 || calls === 4
+      ? new Response("unavailable", { status: 500 })
+      : new Response(JSON.stringify(SAMPLE_RESPONSE)))
+    const opts = { force: true, store: makeStore("fake-token"), fetchImpl }
+    expect(await fetchOAuthUsage(opts)).toBeNull()
+    expect(await fetchOAuthUsage(opts)).not.toBeNull()
+    await fetchOAuthUsage(opts)
+    expect(recoveries.mock.calls).toEqual([["[PROXY] oauth_usage.recovered"]])
+    await fetchOAuthUsage({ ...opts, staleMaxMs: 0 })
+    expect(warnings).toHaveBeenCalledTimes(2)
+  })
+
+  test("does not report stale fallback as recovery or unavailable", async () => {
+    const { fetchImpl } = countingFetch(calls => calls === 2
+      ? new Response("unavailable", { status: 500 })
+      : new Response(JSON.stringify(SAMPLE_RESPONSE)))
+    const opts = { force: true, store: makeStore("fake-token"), fetchImpl }
+    await fetchOAuthUsage(opts)
+    expect((await fetchOAuthUsage(opts))?.stale).toBe(true)
+    await fetchOAuthUsage(opts)
+    expect(warnings).not.toHaveBeenCalled()
+    expect(recoveries).not.toHaveBeenCalled()
+  })
+
+  test("classifies network and parse failures without logging secrets", async () => {
+    const secret = "fake-access-token fake-refresh-token user@example.invalid Authorization: Bearer private"
+    const opts = { force: true, store: makeStore(secret), profileId: secret }
+    await fetchOAuthUsage({ ...opts, fetchImpl: async () => { throw new Error(secret) } })
+    await fetchOAuthUsage({ ...opts, fetchImpl: fixedFetch(() => new Response(secret, {
+      headers: { "x-private": secret },
+    })) })
+    await fetchOAuthUsage({ ...opts, fetchImpl: fixedFetch(() => new Response(secret, {
+      status: 503, headers: { "x-private": secret },
+    })) })
+    expect(warnings.mock.calls).toEqual([
+      ['[PROXY] oauth_usage.unavailable {"reason":"network_error"}'],
+      ['[PROXY] oauth_usage.unavailable {"reason":"parse_error"}'],
+      ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":503}'],
+    ])
+    expect(JSON.stringify(warnings.mock.calls)).not.toContain(secret)
+    expect(JSON.stringify(warnings.mock.calls)).not.toContain("user@example.invalid")
+  })
+
+  test("keeps snapshot and result shapes unchanged", async () => {
+    const result = await fetchOAuthUsageResult({
+      store: makeStore(null), fetchImpl: fixedFetch(() => new Response("{}")),
+    })
+    expect(Object.keys(result).sort()).toEqual(["error", "failure", "lastGood", "snapshot"])
+    expect(Object.keys(result.failure!).sort()).toEqual(["consecutiveFailures", "lastFailureAt", "reason"])
+    const snapshot = await fetchOAuthUsage({
+      store: makeStore("fake-token"), fetchImpl: fixedFetch(() => new Response(JSON.stringify(SAMPLE_RESPONSE))),
+    })
+    expect(Object.keys(snapshot!).sort()).toEqual(["extraUsage", "fetchedAt", "windows"])
   })
 })

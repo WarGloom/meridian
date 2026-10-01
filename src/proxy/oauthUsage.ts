@@ -195,6 +195,29 @@ const rateLimitedUntilByProfile = new Map<string, number>()
 const failureByProfile = new Map<string, OAuthUsageFailure>()
 const DEFAULT_KEY = "__default__"
 
+type UnavailableReason = "no_credentials" | "http_error" | "rate_limited" | "network_error" | "parse_error" | "credential_error"
+type UnavailableDiagnostic = { reason: UnavailableReason; httpStatus?: number }
+const unavailableByProfile = new Map<string, UnavailableDiagnostic>()
+
+function logUnavailable(cacheKey: string, diagnostic: UnavailableDiagnostic): void {
+  diagnostic = {
+    reason: diagnostic.reason,
+    ...(typeof diagnostic.httpStatus === "number" && Number.isInteger(diagnostic.httpStatus)
+      && diagnostic.httpStatus >= 100 && diagnostic.httpStatus <= 599
+      ? { httpStatus: diagnostic.httpStatus } : {}),
+  }
+  const previous = unavailableByProfile.get(cacheKey)
+  if (previous?.reason === diagnostic.reason && previous.httpStatus === diagnostic.httpStatus) return
+  unavailableByProfile.set(cacheKey, diagnostic)
+  // Only fixed reasons and numeric statuses: profile IDs and exception messages
+  // can contain emails or credentials. Do not pass them to either log sink.
+  console.warn(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
+}
+
+function logRecovered(cacheKey: string): void {
+  if (unavailableByProfile.delete(cacheKey)) console.info("[PROXY] oauth_usage.recovered")
+}
+
 function recordFailure(cacheKey: string, reason: OAuthUsageError): void {
   const prev = failureByProfile.get(cacheKey)
   failureByProfile.set(cacheKey, {
@@ -300,7 +323,7 @@ async function callAnthropic(
   token: string,
   fetchImpl: FetchLike,
   signal?: AbortSignal,
-): Promise<RawOAuthUsageResponse | { __status: number; retryAfterMs: number | null }> {
+): Promise<RawOAuthUsageResponse | { __status: number; retryAfterMs: number | null } | { __parseError: true }> {
   const res = await fetchImpl(OAUTH_USAGE_URL, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -315,7 +338,14 @@ async function callAnthropic(
       retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
     }
   }
-  return (await res.json()) as RawOAuthUsageResponse
+  try {
+    const raw: unknown = await res.json()
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)
+      || "__status" in raw || "__parseError" in raw) return { __parseError: true }
+    return raw as RawOAuthUsageResponse
+  } catch {
+    return { __parseError: true }
+  }
 }
 
 export interface FetchOAuthUsageOpts {
@@ -397,6 +427,7 @@ export async function fetchOAuthUsageResult(opts?: FetchOAuthUsageOpts): Promise
     const snapshot = await _testOverride(opts)
     if (snapshot) {
       failureByProfile.delete(cacheKey)
+      if (!snapshot.stale) logRecovered(cacheKey)
       return withProvenance(cacheKey, { snapshot, error: null })
     }
     // The override returns a bare snapshot-or-null, so the reason has to come
@@ -405,6 +436,9 @@ export async function fetchOAuthUsageResult(opts?: FetchOAuthUsageOpts): Promise
     // cooldown the same process just recorded.
     const error = missingReason(cacheKey)
     recordFailure(cacheKey, error)
+    logUnavailable(cacheKey, error === "rate_limited"
+      ? { reason: "rate_limited", httpStatus: 429 }
+      : { reason: "no_credentials" })
     return withProvenance(cacheKey, { snapshot: null, error })
   }
   return withProvenance(cacheKey, await fetchOAuthUsageImpl(opts))
@@ -423,13 +457,21 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   // `attempted` marks a check that actually reached the credential store or
   // upstream. The 429 cooldown turns polls away before either, and those must
   // not advance the failure count — see OAuthUsageFailure.
-  const staleOr = (reason: string, error: OAuthUsageError, attempted = true): RawUsageResult => {
+  const staleOr = (
+    reason: string,
+    error: OAuthUsageError,
+    attempted = true,
+    diagnostic: UnavailableDiagnostic = error === "rate_limited"
+      ? { reason: "rate_limited", httpStatus: 429 }
+      : { reason: "no_credentials" },
+  ): RawUsageResult => {
     if (attempted) recordFailure(cacheKey, error)
     const last = cacheByProfile.get(cacheKey)
     if (last && Date.now() - last.fetchedAt < staleMaxMs) {
-      claudeLog("oauth_usage.serving_stale", { profile: cacheKey, reason, ageMs: Date.now() - last.fetchedAt })
+      claudeLog("oauth_usage.serving_stale", { reason, ageMs: Date.now() - last.fetchedAt })
       return { snapshot: { ...last, stale: true }, error: null }
     }
+    logUnavailable(cacheKey, diagnostic)
     return { snapshot: null, error }
   }
 
@@ -453,31 +495,35 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   const rateLimitBackoffMs = opts?.rateLimitBackoffMs ?? RATE_LIMIT_BACKOFF_MS_DEFAULT
 
   const promise = (async () => {
+    let failureReason: UnavailableReason = "credential_error"
     try {
       const token = await readAccessToken(store)
       if (!token) {
         // This read failing intermittently (e.g. a Keychain entry racing a
         // token-refresh rewrite) was previously silent — log it so flapping
         // usage displays are diagnosable.
-        claudeLog("oauth_usage.no_token", { profile: cacheKey })
+        claudeLog("oauth_usage.no_token")
         return staleOr("no_token", "no_token")
       }
 
+      failureReason = "network_error"
       let result = await callAnthropic(token, fetchImpl)
       if ("__status" in result && result.__status === 401) {
-        claudeLog("oauth_usage.token_refresh_attempt", { profile: cacheKey })
+        claudeLog("oauth_usage.token_refresh_attempt")
+        failureReason = "credential_error"
         const refreshed = await refreshOAuthToken(store)
         if (!refreshed) {
-          claudeLog("oauth_usage.refresh_failed", { profile: cacheKey })
+          claudeLog("oauth_usage.refresh_failed")
           // Not `no_token`: the token is present, and a read-only instance
           // declines to refresh it BY DESIGN (credentialsMode.ts). Reporting
           // a missing login here would tell the operator to re-authenticate
           // every account on the box, on the one instance that is forbidden
           // from touching credentials.
-          return staleOr("refresh_failed", "upstream_error")
+          return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
         }
         const newToken = await readAccessToken(store)
         if (!newToken) return staleOr("no_token_after_refresh", "no_token")
+        failureReason = "network_error"
         result = await callAnthropic(newToken, fetchImpl)
       }
       if ("__status" in result) {
@@ -496,21 +542,29 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
           )
           rateLimitedUntilByProfile.set(cacheKey, Date.now() + retryAfterMs)
         }
-        claudeLog("oauth_usage.upstream_error", { profile: cacheKey, status: result.__status })
+        claudeLog("oauth_usage.upstream_error", { status: result.__status })
         return staleOr(
           `upstream_${result.__status}`,
           result.__status === 429 ? "rate_limited" : "upstream_error",
+          true,
+          { reason: result.__status === 429 ? "rate_limited" : "http_error", httpStatus: result.__status },
         )
       }
 
+      if ("__parseError" in result) {
+        return staleOr("parse_error", "upstream_error", true, { reason: "parse_error" })
+      }
+
+      failureReason = "parse_error"
+      const snapshot = buildSnapshot(result)
       rateLimitedUntilByProfile.delete(cacheKey)
       failureByProfile.delete(cacheKey)
-      const snapshot = buildSnapshot(result)
       cacheByProfile.set(cacheKey, snapshot)
+      logRecovered(cacheKey)
       return { snapshot, error: null }
-    } catch (err) {
-      claudeLog("oauth_usage.fetch_failed", { profile: cacheKey, error: err instanceof Error ? err.message : String(err) })
-      return staleOr("exception", "upstream_error")
+    } catch {
+      claudeLog("oauth_usage.fetch_failed", { reason: failureReason })
+      return staleOr("exception", "upstream_error", true, { reason: failureReason })
     } finally {
       inflightByProfile.delete(cacheKey)
     }
@@ -539,4 +593,5 @@ export function resetOAuthUsageCache(): void {
   inflightByProfile.clear()
   rateLimitedUntilByProfile.clear()
   failureByProfile.clear()
+  unavailableByProfile.clear()
 }
