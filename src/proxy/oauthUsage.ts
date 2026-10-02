@@ -211,11 +211,11 @@ function logUnavailable(cacheKey: string, diagnostic: UnavailableDiagnostic): vo
   unavailableByProfile.set(cacheKey, diagnostic)
   // Only fixed reasons and numeric statuses: profile IDs and exception messages
   // can contain emails or credentials. Do not pass them to either log sink.
-  console.warn(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
+  console.error(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
 }
 
 function logRecovered(cacheKey: string): void {
-  if (unavailableByProfile.delete(cacheKey)) console.warn("[PROXY] oauth_usage.recovered")
+  if (unavailableByProfile.delete(cacheKey)) console.error("[PROXY] oauth_usage.recovered")
 }
 
 function recordFailure(cacheKey: string, reason: OAuthUsageError): void {

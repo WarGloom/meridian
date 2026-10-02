@@ -11,7 +11,7 @@ describe("OAuth usage 401 recovery", () => {
   let tokens: string[]
   let readonlyBefore: string | undefined
   let network: ReturnType<typeof spyOn<typeof globalThis, "fetch">>
-  let warnings: ReturnType<typeof spyOn<typeof console, "warn">>
+  let warnings: ReturnType<typeof spyOn<typeof console, "error">>
 
   beforeEach(() => {
     resetOAuthUsageCache()
@@ -27,7 +27,7 @@ describe("OAuth usage 401 recovery", () => {
       async write(next) { credentials = structuredClone(next); return true },
     }
     tokens = []
-    warnings = spyOn(console, "warn").mockImplementation(() => {})
+    warnings = spyOn(console, "error").mockImplementation(() => {})
     // Every refresh/plan request is intercepted; stores are entirely in memory.
     network = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
       throw new Error("unexpected network request")
