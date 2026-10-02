@@ -187,11 +187,16 @@ const CACHE_TTL_MS_DEFAULT = 30_000
 // this bound, so genuinely dead credentials still surface as missing data.
 const STALE_MAX_MS_DEFAULT = 15 * 60_000
 const RATE_LIMIT_BACKOFF_MS_DEFAULT = 60_000
+const RATE_LIMIT_BACKOFF_MAX_MS = 15 * 60_000
+// Usage is advisory: respect long upstream waits, but re-probe after at most
+// an hour so a malformed hint cannot suspend polling for days.
+const RATE_LIMIT_RETRY_AFTER_MAX_MS = 60 * 60_000
 
 /** Per-profile cache. Key = profileId (or DEFAULT_KEY for the unscoped default). */
 const cacheByProfile = new Map<string, OAuthUsageSnapshot>()
 const inflightByProfile = new Map<string, Promise<RawUsageResult>>()
 const rateLimitedUntilByProfile = new Map<string, number>()
+const rateLimitBackoffByProfile = new Map<string, number>()
 const failureByProfile = new Map<string, OAuthUsageFailure>()
 const DEFAULT_KEY = "__default__"
 
@@ -355,7 +360,7 @@ export interface FetchOAuthUsageOpts {
   ttlMs?: number
   /** Max age of a last-good snapshot served on fetch failure (default 15 min). */
   staleMaxMs?: number
-  /** Minimum per-profile cooldown after HTTP 429 (default 60s). */
+  /** Initial/minimum per-profile cooldown after HTTP 429 (default 60s). */
   rateLimitBackoffMs?: number
   force?: boolean
   store?: CredentialStore
@@ -536,18 +541,28 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       }
       if ("__status" in result) {
         if (result.__status === 429) {
-          // Floor at the backoff, but cap at staleMaxMs: the cooldown suppresses
-          // every fetch, so one longer than the stale window would age the
-          // last-good snapshot out with nothing able to refresh it — staleOr
-          // starts returning null and the display blanks for the remainder.
-          // Capping means at most one retry per stale window, still far below
-          // the every-poll retries this backoff exists to stop.
-          // The cap never drops below the backoff floor, so a small staleMaxMs
-          // can't disarm the throttle this whole change exists to provide.
-          const retryAfterMs = Math.min(
-            Math.max(rateLimitBackoffMs, result.retryAfterMs ?? 0),
-            Math.max(staleMaxMs, rateLimitBackoffMs),
-          )
+          let retryAfterMs: number
+          if (result.retryAfterMs !== null && Number.isFinite(result.retryAfterMs) && result.retryAfterMs > 0) {
+            // Snapshot expiry governs display freshness, not permission to retry.
+            retryAfterMs = Math.min(
+              RATE_LIMIT_RETRY_AFTER_MAX_MS,
+              Math.max(rateLimitBackoffMs, result.retryAfterMs),
+            )
+          } else {
+            const floorMs = Math.min(RATE_LIMIT_BACKOFF_MAX_MS, Math.max(0, rateLimitBackoffMs))
+            const previous = rateLimitBackoffByProfile.get(cacheKey)
+            const backoffMs = Math.min(
+              RATE_LIMIT_BACKOFF_MAX_MS,
+              Math.max(floorMs, previous === undefined ? floorMs : previous * 2),
+            )
+            rateLimitBackoffByProfile.set(cacheKey, backoffMs)
+            // Keep the nominal delay separate: jitter must not compound across
+            // attempts. Clamp +/-20% jitter to the configured floor and cap.
+            retryAfterMs = Math.min(
+              RATE_LIMIT_BACKOFF_MAX_MS,
+              Math.max(floorMs, Math.round(backoffMs * (0.8 + Math.random() * 0.4))),
+            )
+          }
           rateLimitedUntilByProfile.set(cacheKey, Date.now() + retryAfterMs)
         }
         claudeLog("oauth_usage.upstream_error", { status: result.__status })
@@ -566,6 +581,7 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       failureReason = "parse_error"
       const snapshot = buildSnapshot(result)
       rateLimitedUntilByProfile.delete(cacheKey)
+      rateLimitBackoffByProfile.delete(cacheKey)
       failureByProfile.delete(cacheKey)
       cacheByProfile.set(cacheKey, snapshot)
       logRecovered(cacheKey)
@@ -600,6 +616,7 @@ export function resetOAuthUsageCache(): void {
   cacheByProfile.clear()
   inflightByProfile.clear()
   rateLimitedUntilByProfile.clear()
+  rateLimitBackoffByProfile.clear()
   failureByProfile.clear()
   unavailableByProfile.clear()
 }
