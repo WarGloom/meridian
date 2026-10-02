@@ -274,11 +274,11 @@ function logUnavailable(cacheKey: string, diagnostic: UnavailableDiagnostic): vo
   unavailableByProfile.set(cacheKey, diagnostic)
   // Only fixed reasons and numeric statuses: profile IDs and exception messages
   // can contain emails or credentials. Do not pass them to either log sink.
-  console.warn(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
+  console.error(`[PROXY] oauth_usage.unavailable ${JSON.stringify(diagnostic)}`)
 }
 
 function logRecovered(cacheKey: string): void {
-  if (unavailableByProfile.delete(cacheKey)) console.warn("[PROXY] oauth_usage.recovered")
+  if (unavailableByProfile.delete(cacheKey)) console.error("[PROXY] oauth_usage.recovered")
 }
 
 function recordFailure(cacheKey: string, reason: OAuthUsageError): void {
@@ -901,19 +901,23 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       let result = await callAnthropic(token, fetchImpl)
       if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
       if ("__status" in result && result.__status === 401) {
-        claudeLog("oauth_usage.token_refresh_attempt", { profile: cacheKey })
         failureReason = "credential_error"
-        const refreshed = await refresh(store)
-        if (!refreshed) {
-          claudeLog("oauth_usage.refresh_failed")
-          // Not `no_token`: the token is present, and a read-only instance
-          // declines to refresh it BY DESIGN (credentialsMode.ts). Reporting
-          // a missing login here would tell the operator to re-authenticate
-          // every account on the box, on the one instance that is forbidden
-          // from touching credentials.
-          return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
+        // The SDK/CLI may have rotated the token while usage was in flight.
+        // Reuse that rotation before exchanging its refresh token ourselves.
+        let latest = await readAccessToken(store)
+        if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
+        if (!latest.token || latest.token === token) {
+          claudeLog("oauth_usage.token_refresh_attempt", { profile: cacheKey })
+          const refreshed = await refresh(store)
+          // Even a failed/refused refresh can race with a successful rotation
+          // by the credential owner. Read-only instances can reuse it too.
+          latest = await readAccessToken(store)
+          if (!refreshed && (!latest.token || latest.token === token)) {
+            claudeLog("oauth_usage.refresh_failed")
+            return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
+          }
         }
-        const { token: newToken, failed: newReadFailed } = await readAccessToken(store)
+        const { token: newToken, failed: newReadFailed } = latest
         if (inflightByProfile.get(cacheKey) !== promise) return fetchOAuthUsageImpl({ ...opts, force: false })
         if (!newToken) return staleOr("no_token_after_refresh", "no_token", true, {
           reason: newReadFailed ? "credential_error" : "no_credentials",
