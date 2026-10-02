@@ -12,8 +12,8 @@
  *   anthropic-beta: oauth-2025-04-20
  *
  * We reuse `tokenRefresh.ts`'s cross-platform credential store (macOS Keychain
- * or `~/.claude/.credentials.json`) to read the access token, and trigger a
- * background refresh on 401.
+ * or `~/.claude/.credentials.json`) to read the access token, and perform
+ * one refresh and retry on 401, reusing rotations made by the SDK/CLI.
  *
  * Per-profile caching: each profile has its own 30s TTL cache so multi-account
  * setups can be queried independently without cross-contamination. Concurrent
@@ -512,19 +512,22 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       failureReason = "network_error"
       let result = await callAnthropic(token, fetchImpl)
       if ("__status" in result && result.__status === 401) {
-        claudeLog("oauth_usage.token_refresh_attempt")
         failureReason = "credential_error"
-        const refreshed = await refreshOAuthToken(store)
-        if (!refreshed) {
-          claudeLog("oauth_usage.refresh_failed")
-          // Not `no_token`: the token is present, and a read-only instance
-          // declines to refresh it BY DESIGN (credentialsMode.ts). Reporting
-          // a missing login here would tell the operator to re-authenticate
-          // every account on the box, on the one instance that is forbidden
-          // from touching credentials.
-          return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
+        // The SDK/CLI may have rotated the token while usage was in flight.
+        // Reuse that rotation before exchanging its refresh token ourselves.
+        let latest = await readAccessToken(store)
+        if (!latest.token || latest.token === token) {
+          claudeLog("oauth_usage.token_refresh_attempt")
+          const refreshed = await refreshOAuthToken(store)
+          // Even a failed/refused refresh can race with a successful rotation
+          // by the credential owner. Read-only instances can reuse it too.
+          latest = await readAccessToken(store)
+          if (!refreshed && (!latest.token || latest.token === token)) {
+            claudeLog("oauth_usage.refresh_failed")
+            return staleOr("refresh_failed", "upstream_error", true, { reason: "http_error", httpStatus: 401 })
+          }
         }
-        const { token: newToken, failed: newReadFailed } = await readAccessToken(store)
+        const { token: newToken, failed: newReadFailed } = latest
         if (!newToken) return staleOr("no_token_after_refresh", "no_token", true, {
           reason: newReadFailed ? "credential_error" : "no_credentials",
         })
