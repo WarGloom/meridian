@@ -1175,18 +1175,18 @@ describe("MERIDIAN_USAGE_CACHE_TTL_MS", () => {
 })
 
 describe("OAuth availability diagnostics", () => {
-  let warnings: ReturnType<typeof spyOn<typeof console, "warn">>
-  let recoveries: ReturnType<typeof spyOn<typeof console, "info">>
+  let warnings: ReturnType<typeof spyOn<typeof console, "error">>
+  let ttyWarnings: ReturnType<typeof spyOn<typeof console, "warn">>
 
   beforeEach(() => {
     resetOAuthUsageCache()
-    warnings = spyOn(console, "warn").mockImplementation(() => {})
-    recoveries = spyOn(console, "info").mockImplementation(() => {})
+    warnings = spyOn(console, "error").mockImplementation(() => {})
+    ttyWarnings = spyOn(console, "warn").mockImplementation(() => {})
   })
 
   afterEach(() => {
     warnings.mockRestore()
-    recoveries.mockRestore()
+    ttyWarnings.mockRestore()
   })
 
   test("logs missing credentials once per profile, not per poll", async () => {
@@ -1198,7 +1198,7 @@ describe("OAuth availability diagnostics", () => {
     ])
     await fetchOAuthUsage({ ...opts, profileId: "other" })
     expect(warnings).toHaveBeenCalledTimes(2)
-    expect(recoveries).not.toHaveBeenCalled()
+    expect(ttyWarnings).not.toHaveBeenCalled()
   })
 
   test("logs HTTP reason/status changes once and preserves cooldown dedupe", async () => {
@@ -1226,7 +1226,7 @@ describe("OAuth availability diagnostics", () => {
       ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":500}'],
       ["[PROXY] oauth_usage.recovered"],
     ])
-    expect(recoveries).not.toHaveBeenCalled()
+    expect(ttyWarnings).not.toHaveBeenCalled()
     await fetchOAuthUsage({ ...opts, staleMaxMs: 0 })
     expect(warnings).toHaveBeenCalledTimes(3)
   })
@@ -1240,7 +1240,7 @@ describe("OAuth availability diagnostics", () => {
     expect((await fetchOAuthUsage(opts))?.stale).toBe(true)
     await fetchOAuthUsage(opts)
     expect(warnings).not.toHaveBeenCalled()
-    expect(recoveries).not.toHaveBeenCalled()
+    expect(ttyWarnings).not.toHaveBeenCalled()
   })
 
   test("classifies network and parse failures without logging secrets", async () => {
@@ -1308,7 +1308,7 @@ describe("OAuth availability diagnostics", () => {
       ['[PROXY] oauth_usage.unavailable {"reason":"http_error","httpStatus":503}'],
       ["[PROXY] oauth_usage.recovered"],
     ])
-    expect(recoveries).not.toHaveBeenCalled()
+    expect(ttyWarnings).not.toHaveBeenCalled()
   })
 
   test("a throwing injected store logs credential_error without its exception text", async () => {
