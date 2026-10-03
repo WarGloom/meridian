@@ -14,6 +14,7 @@ import { installMcpToolsMock } from "./mcpToolsMock"
 let mockError: Error | null = null
 
 import { resolveMockSdkSessionId } from "./helpers"
+import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk"
 
 installSdkMock(() => ({
   query: (params: any) => {
@@ -52,6 +53,7 @@ installMcpToolsMock(() => ({
 }))
 
 const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { rateLimitStore } = await import("../proxy/rateLimitStore")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -220,6 +222,53 @@ describe("Error classification", () => {
 
       expect(res.status).toBe(503)
       expect(res.headers.get("Retry-After")).toBe("5")
+    })
+
+    /** The profile identity a bare harness resolves to, with its five-hour
+     *  allowance spent and returning in two hours. */
+    function seedSpentWindow() {
+      const info: SDKRateLimitInfo = {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        utilization: 1,
+        resetsAt: Date.now() + 2 * 3600_000,
+      }
+      rateLimitStore.record("default", info)
+    }
+
+    it("keeps a transient 503 on the short constant even when the window is spent", async () => {
+      // A busy bookkeeping lock is Meridian's OWN load. Before the hint was
+      // gated on the refusal being quota-shaped, this borrowed the account's
+      // five-hour boundary and told the client to sleep for hours on a failure
+      // whose own message says "retry shortly" — observed live as a session
+      // parked for 2h40m on attempt #1.
+      seedSpentWindow()
+      try {
+        mockError = new Error("[sessionStore] timed out waiting for lock /tmp/sessions/abc.lock")
+        const app = createTestApp()
+        const res = await post(app, BASIC_REQUEST)
+
+        expect(res.status).toBe(503)
+        expect(res.headers.get("Retry-After")).toBe("5")
+      } finally {
+        rateLimitStore.clear("default")
+      }
+    })
+
+    it("still lends the account's own window to a quota refusal", async () => {
+      // The gate must not disable the hint it was added for: a 429 is exactly
+      // the case where the spent window IS the wait.
+      seedSpentWindow()
+      try {
+        mockError = new Error("429 Too Many Requests - rate limit exceeded")
+        const app = createTestApp()
+        const res = await post(app, BASIC_REQUEST)
+
+        expect(res.status).toBe(429)
+        expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(7_000)
+      } finally {
+        rateLimitStore.clear("default")
+      }
     })
 
     it("stays silent on failures that waiting cannot fix", async () => {

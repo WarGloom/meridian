@@ -6872,10 +6872,19 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // turn's response headers went out with `message_start`, long
               // before this failure existed, so the error frame is the only
               // place a hint can still reach the client (#901).
+              //
+              // Only a quota refusal may lend its own window. An account's
+              // five-hour boundary answers "when does your allowance return",
+              // not "when will this transient failure clear". A 503 here is
+              // Meridian's own load - a busy bookkeeping lock, or upstream
+              // overload - so borrowing a spent window would idle the client
+              // for hours on a blip that clears in seconds.
               const streamRetryAfter = retryAfterSeconds({
                 status: streamErr.status,
                 errorMessage: errMsg,
-                resetAtMs: observedResetAtMs(profile.id, Date.now()),
+                resetAtMs: streamErr.type === "rate_limit_error"
+                  ? observedResetAtMs(profile.id, Date.now())
+                  : null,
               })
 
               // Surface the SDK termination reason (max_turns / process_exit / aborted)
@@ -7606,10 +7615,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // out as a real `Retry-After` (#901). `resolvedProfileId` is undefined
         // when the request died before profile resolution, which just means the
         // per-status default stands.
+        //
+        // Only a quota refusal may lend its own window - see the streaming
+        // path above. A transient 503 (busy bookkeeping lock, upstream
+        // overload) is proxy load, and a spent five-hour boundary is not its
+        // wait; the per-status constant is.
         const retryAfter = retryAfterSeconds({
           status: classified.status,
           errorMessage: errMsg,
-          resetAtMs: observedResetAtMs(resolvedProfileId, Date.now()),
+          resetAtMs: classified.type === "rate_limit_error"
+            ? observedResetAtMs(resolvedProfileId, Date.now())
+            : null,
         })
 
         claudeLog("proxy.error", { error: errMsg, classified: classified.type })
