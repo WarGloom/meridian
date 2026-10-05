@@ -52,8 +52,8 @@ delete process.env.CLAUDE_PROXY_FOLLOW_ACTIVE
 // pair already carrying this pid can only be a dead process's, so it is
 // cleared rather than inherited.
 sweepStaleTestDirs(tmpdir())
-const { configDir, sessionDir } = testDirsFor(tmpdir(), process.pid)
-for (const dir of [configDir, sessionDir]) {
+const { configDir, sessionDir, sdkFeaturesDir } = testDirsFor(tmpdir(), process.pid)
+for (const dir of [configDir, sessionDir, sdkFeaturesDir]) {
   if (!removeTestDir(dir)) throw new Error(`Could not reset test scratch directory: ${dir}`)
   mkdirSync(dir, { recursive: true })
 }
@@ -63,6 +63,7 @@ for (const dir of [configDir, sessionDir]) {
 afterAll(() => {
   removeTestDir(configDir)
   removeTestDir(sessionDir)
+  removeTestDir(sdkFeaturesDir)
 })
 process.env.MERIDIAN_CONFIG_DIR = configDir
 process.env.MERIDIAN_SESSION_DIR = sessionDir
@@ -99,5 +100,4 @@ process.env.MERIDIAN_TEST_DISABLE_SDK_PROCESS_GATE = "1"
 // XDG_CONFIG_HOME/meridian. Isolate that path too: otherwise an explicit
 // local adapter setting (for example opencode.thinking: "disabled") changes
 // request-level SDK parameter tests.
-process.env.XDG_CONFIG_HOME = join(tmpdir(), `meridian-test-sdk-features-${process.pid}`)
-mkdirSync(process.env.XDG_CONFIG_HOME, { recursive: true })
+process.env.XDG_CONFIG_HOME = sdkFeaturesDir

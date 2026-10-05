@@ -16,13 +16,14 @@
 import { readdirSync, rmSync, type Dirent } from "node:fs"
 import { join } from "node:path"
 
-const TEST_DIR_PATTERN = /^meridian-test-(?:settings|sessions)-([1-9]\d*)$/
+const TEST_DIR_PATTERN = /^meridian-test-(?:settings|sessions|sdk-features)-([1-9]\d*)$/
 const MAX_PID = 0x7fffffff
 
 export function testDirsFor(root: string, pid: number) {
   return {
     configDir: join(root, `meridian-test-settings-${pid}`),
     sessionDir: join(root, `meridian-test-sessions-${pid}`),
+    sdkFeaturesDir: join(root, `meridian-test-sdk-features-${pid}`),
   }
 }
 
