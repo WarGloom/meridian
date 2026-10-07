@@ -130,6 +130,22 @@ describe("explicit model pins reach the subprocess env (#631)", () => {
     queryEnvs = []
   })
 
+  for (const path of ["/v1/messages", "/v1/chat/completions"]) {
+    for (const model of ["claude-haiku-5-5", "claude-haiku-4-5", "haiku"]) {
+      it(`${path} preserves the ${model} Haiku SDK pin`, async () => {
+        const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
+        const res = await app.fetch(new Request(`http://localhost${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, stream: false, messages: [{ role: "user", content: "hi" }] }),
+        }))
+        expect(res.status).toBe(200)
+        expect(queryEnvs).toHaveLength(1)
+        expect(queryEnvs[0]!.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(model === "haiku" ? "claude-haiku-5-5" : model)
+      })
+    }
+  }
+
   it("claude-sonnet-5-5 pins the sonnet tier for the request", async () => {
     const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
     const res = await post(app, "claude-sonnet-5-5")
