@@ -907,9 +907,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       envInt("SESSION_GC_GRACE_MS", SESSION_TURN_MAX_HOLD_MS + 60_000),
     ),
     // JSON budgets external acquisition at the FIFO head. SQLite uses the shared
-    // admission deadline from enqueue, including local FIFO wait.
+    // admission deadline from enqueue, including local FIFO wait. JSON holders
+    // keep the lock across awaits, so a busy host event loop stretches a ~100 ms
+    // hold to seconds; a short budget then fails the request with "bookkeeping
+    // lock is busy" although the lock is only slow, not stuck.
     ...(bookkeepingMode() === "json"
-      ? { lockWaitMs: Math.max(100, envInt("SESSION_GC_LOCK_WAIT_MS", 2_000)) }
+      ? { lockWaitMs: Math.max(100, envInt("SESSION_GC_LOCK_WAIT_MS", 10_000)) }
       : {}),
     // No lease a live request holds can outlive the turn watchdog.
     unarmedLeaseTtlMs: SESSION_TURN_MAX_HOLD_MS + 60_000,
