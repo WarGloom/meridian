@@ -144,10 +144,12 @@ function advanceKeySlot(key: string, meta: SessionStoreMeta): void {
   meta.slots[slot] = current + 1
 }
 
-// No time-based session expiry. SDK sessions persist on Anthropic's side
-// for weeks — discarding our mapping just forces a destructive flat-text
-// replay on the next request. Storage is bounded by MAX_STORED_SESSIONS.
+// A mapping only lets the next request resume its SDK session; without it the
+// conversation is replayed as flat text. Resumes after a week of idle time are
+// rare, while every retained mapping makes each locked store rewrite and every
+// GC pin scan larger. Storage is bounded by age and by MAX_STORED_SESSIONS.
 const DEFAULT_MAX_STORED_SESSIONS = 10_000
+const DEFAULT_MAX_STORED_SESSION_AGE_DAYS = 7
 const DEFAULT_MAX_PRIORITY_ASSIGNMENTS = 5_000
 const DEFAULT_MAX_PRIORITY_ATTEMPTS = 5_000
 const STALE_LOCK_THRESHOLD_MS = 30_000
@@ -160,6 +162,14 @@ export function getMaxStoredSessionsLimit(): number {
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_STORED_SESSIONS
   return parsed
+}
+
+/** Idle age after which a mapping is pruned on the next publish; 0 disables it. */
+export function getMaxStoredSessionAgeMs(): number {
+  const raw = process.env.MERIDIAN_MAX_STORED_SESSION_AGE_DAYS ?? process.env.CLAUDE_PROXY_MAX_STORED_SESSION_AGE_DAYS
+  const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_MAX_STORED_SESSION_AGE_DAYS
+  const days = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_MAX_STORED_SESSION_AGE_DAYS
+  return days * 24 * 60 * 60 * 1000
 }
 
 export function getMaxPriorityAssignmentsLimit(): number {
@@ -1236,7 +1246,8 @@ export function storeSharedSession(
 
       // Prune only mappings that are not exact route authorities. If the
       // configured bound cannot admit this protected write, reject the whole CAS
-      // rather than leave a dangling route or silently exceed the limit.
+      // rather than leave a dangling route or silently exceed the limit. Expired
+      // mappings sort first, so they are a prefix of the removable list.
       const maxEntries = getMaxStoredSessionsLimit()
       const keys = Object.keys(store)
       const protectedMappings = meta.version === PRIORITY_STORE_META_VERSION
@@ -1251,7 +1262,12 @@ export function storeSharedSession(
         .filter((candidate) => !protectedMappings.has(candidate))
         .sort((a, b) => (store[a]!.lastUsedAt || 0) - (store[b]!.lastUsedAt || 0))
       if (removable.length < removeCount) return false
-      for (const candidate of removable.slice(0, removeCount)) {
+      const maxAgeMs = getMaxStoredSessionAgeMs()
+      const firstFresh = maxAgeMs > 0
+        ? removable.findIndex((candidate) => (store[candidate]!.lastUsedAt || 0) >= Date.now() - maxAgeMs)
+        : 0
+      const expiredCount = firstFresh === -1 ? removable.length : firstFresh
+      for (const candidate of removable.slice(0, Math.max(removeCount, expiredCount))) {
         delete store[candidate]
         advanceKeySlot(candidate, meta)
       }
