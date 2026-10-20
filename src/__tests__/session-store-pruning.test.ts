@@ -1,8 +1,9 @@
 /**
- * Tests for count-based session store pruning.
+ * Tests for session store pruning.
  *
- * Validates that the file store bounds entries by count (not TTL),
- * evicting the least recently used entries when capacity is exceeded.
+ * The file store is bounded by count and by idle age: the least recently used
+ * entries go first when capacity is exceeded, and mappings idle past the age
+ * limit are dropped on the next publish.
  */
 
 import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test"
@@ -17,6 +18,7 @@ describe("Session store count-based pruning", () => {
   let dateSpy: Mock<typeof Date.now>
   const originalDir = process.env.CLAUDE_PROXY_SESSION_DIR
   const originalMax = process.env.CLAUDE_PROXY_MAX_STORED_SESSIONS
+  const originalAge = process.env.MERIDIAN_MAX_STORED_SESSION_AGE_DAYS
 
   beforeEach(async () => {
     // Mock Date.now() to return increasing values so that
@@ -40,6 +42,8 @@ describe("Session store count-based pruning", () => {
     else process.env.CLAUDE_PROXY_SESSION_DIR = originalDir
     if (originalMax === undefined) delete process.env.CLAUDE_PROXY_MAX_STORED_SESSIONS
     else process.env.CLAUDE_PROXY_MAX_STORED_SESSIONS = originalMax
+    if (originalAge === undefined) delete process.env.MERIDIAN_MAX_STORED_SESSION_AGE_DAYS
+    else process.env.MERIDIAN_MAX_STORED_SESSION_AGE_DAYS = originalAge
   })
 
   it("keeps all entries when under capacity", async () => {
@@ -85,18 +89,32 @@ describe("Session store count-based pruning", () => {
     expect(lookupSharedSession("future-0")).toBeUndefined()
   })
 
-  it("does NOT prune by time — old sessions survive", async () => {
-    // Store a session, then manually set lastUsedAt to 48 hours ago
-    // by writing directly. Under the old TTL system this would be pruned.
-    await storeSharedSession("ancient", "claude-ancient")
+  it("prunes mappings idle longer than the age limit on the next publish", async () => {
+    const day = 24 * 60 * 60 * 1000
+    let now = 1_800_000_000_000
+    dateSpy.mockImplementation(() => now)
+    await storeSharedSession("stale", "claude-stale")
+    now += 6 * day
+    await storeSharedSession("recent", "claude-recent")
 
-    // Read it back — should still exist regardless of age
-    // (we can't easily fake the timestamp without writing raw JSON,
-    //  but we CAN verify that a normally-stored session isn't pruned
-    //  on the next read — which is the core behavior change)
-    const session = lookupSharedSession("ancient")
-    expect(session).toBeDefined()
-    expect(session!.claudeSessionId).toBe("claude-ancient")
+    // stale is now 8 days idle (default limit 7), recent only 2
+    now += 2 * day
+    await storeSharedSession("fresh", "claude-fresh")
+
+    expect(lookupSharedSession("stale")).toBeUndefined()
+    expect(lookupSharedSession("recent")?.claudeSessionId).toBe("claude-recent")
+    expect(lookupSharedSession("fresh")?.claudeSessionId).toBe("claude-fresh")
+  })
+
+  it("keeps idle mappings when the age limit is 0", async () => {
+    process.env.MERIDIAN_MAX_STORED_SESSION_AGE_DAYS = "0"
+    let now = 1_800_000_000_000
+    dateSpy.mockImplementation(() => now)
+    await storeSharedSession("ancient", "claude-ancient")
+    now += 60 * 24 * 60 * 60 * 1000
+    await storeSharedSession("fresh", "claude-fresh")
+
+    expect(lookupSharedSession("ancient")?.claudeSessionId).toBe("claude-ancient")
   })
 
   it("preserves most recently used entries during pruning", async () => {
