@@ -357,7 +357,7 @@ it("two real Node publishers: one mapping CAS winner, no partial rows (N=10)", a
       const outcomes = await Promise.all(workers.map((worker) => worker.exit))
       expect(outcomes.filter((value) => typeof value.result === "string" && value.result !== "busy")).toHaveLength(1)
       expect(outcomes.filter((value) => value.result === false || value.result === "busy")).toHaveLength(1)
-      expect(outcomes.every((value) => value.node.startsWith("22."))).toBe(true)
+      expect(outcomes.every((value) => Number(value.node.split(".")[0]) >= 22)).toBe(true)
       expect(handle.reader.all("SELECT key FROM mappings WHERE key=?", key)).toHaveLength(1)
       expect(handle.reader.all("SELECT * FROM mapping_pins WHERE mapping_key=?", key)).toHaveLength(1)
       for (const [id, loc] of locators.entries()) {
