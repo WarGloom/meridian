@@ -131,7 +131,7 @@ it.each(["directory", "directory-with-child", "symlink", "fifo"] as const)
     if (kind === "directory" || kind === "directory-with-child") {
       mkdirSync(path, { mode: 0o700 })
       if (kind === "directory-with-child") mkdirSync(join(path, "child"), { mode: 0o700 })
-      expect(lstatSync(path).nlink).toBeGreaterThan(1)
+      expect(lstatSync(path).isDirectory()).toBe(true)
     } else if (kind === "symlink") {
       const result = spawnSync("ln", ["-s", target, path])
       expect(result.status).toBe(0)
