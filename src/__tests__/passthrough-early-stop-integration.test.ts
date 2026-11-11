@@ -1276,7 +1276,7 @@ describe("Integration: passthrough early stop", () => {
       messages: [{ role: "user", content: "read a" }],
     }, "es-forwarded-batch")
     expect(res.status).toBe(200)
-    expect(capturedQueryParams.options.maxTurns).toBe(4)
+    expect(capturedQueryParams.options.maxTurns).toBe(30)
     expect(postToolBatchResults).toEqual([
       { ids: ["fb-repeat"], result: {} },
       { ids: ["fb-1"], result: { continue: false, stopReason: expect.any(String) } },
@@ -3158,7 +3158,7 @@ describe("Integration: passthrough early stop", () => {
     }, sessionHeader)
     expect(res.status).toBe(200)
     const events = parseSSE(await res.text())
-    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(4)
+    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(30)
     expect(events.filter(e => e.event === "error")).toHaveLength(0)
     const toolBlocks = events.flatMap(({ event, data }) => {
       const block = data.content_block as { type?: string; id?: string; name?: string } | undefined
@@ -3202,7 +3202,7 @@ describe("Integration: passthrough early stop", () => {
       messages: [{ role: "user", content: "list the files" }],
     }, "es-deferred-unproven")
     const events = parseSSE(await res.text())
-    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(4)
+    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(30)
     expect(events.filter(e => e.event === "error")).toHaveLength(1)
   })
 
@@ -3456,7 +3456,7 @@ describe("Integration: passthrough early stop", () => {
     }, sessionHeader, { "x-meridian-agent": "pi", "x-session-affinity": sessionHeader, "user-agent": "pi/1.1.0" })
     expect(res.status).toBe(200)
     const events = parseSSE(await res.text())
-    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(4)
+    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(30)
     expect(events.filter(e => e.event === "error")).toHaveLength(0)
     expect(deliveredToolInputs(events).map(({ id, name }) => `${id}:${name}`)).toEqual(["toolu_raw_tab_deferred:edit"])
     expect(stopReasons(events)).toEqual(["tool_use"])
@@ -3944,7 +3944,7 @@ describe("Integration: passthrough early stop", () => {
       messages: [{ role: "user", content: "list the files" }],
     }, "es-undeclared-deferred")
     const events = parseSSE(await res.text())
-    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(4)
+    expect(capturedQueryParamsAll[0]?.options.maxTurns).toBe(30)
     expect(events.filter(e => e.event === "error")).toHaveLength(0)
     expect(streamedToolCalls(events)).toEqual(["toolu_invented:bash_placeholder"])
     expect(stopReasons(events)).toEqual(["tool_use"])
