@@ -332,7 +332,7 @@ describe("buildQueryOptions", () => {
 
     it("ends a deferred-tools query after the batch forwarded to the client", async () => {
       const result = buildQueryOptions(makeContext({ passthrough: true, hasDeferredTools: true, isForwardedToolUse }))
-      expect(result.options.maxTurns).toBe(4)
+      expect(result.options.maxTurns).toBe(30)
       const hooks = postToolBatch(result)
       expect(hooks).toHaveLength(1)
       const hook = hooks![0]!.hooks[0]!
@@ -374,7 +374,7 @@ describe("buildQueryOptions", () => {
         isForwardedToolUse,
         outputFormat: { type: "json_schema", schema: { type: "object" } } as any,
       }))
-      expect(result.options.maxTurns).toBe(4)
+      expect(result.options.maxTurns).toBe(30)
       expect(postToolBatch(result)).toBeUndefined()
     })
   })
