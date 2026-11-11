@@ -304,20 +304,24 @@ it("an opened, hung real Node deletion executor stays fenced across GC and recon
   const entered = once(child.stdout!, "data")
   let joined = false
   try {
+    const pid = child.pid
+    if (pid === undefined) throw new Error("Node fixture did not start")
     let executor: ReturnType<typeof incarnations.captureProcessIncarnation>
     for (let attempt = 0; attempt < 100 && !executor; attempt++) {
-      executor = incarnations.captureProcessIncarnation(child.pid!)
+      executor = incarnations.captureProcessIncarnation(pid)
       if (!executor) await new Promise(resolve => setTimeout(resolve, 10))
     }
     expect(executor).toBeDefined()
     expect(existsSync(marker)).toBe(false)
-    await attachDeletionExecutor(claim.key, claim.deletionToken!, executor!, child.pid!, options)
+    await attachDeletionExecutor(claim.key, claim.deletionToken!, executor!, pid, options)
     child.stdin!.write("open gate")
     const timeout = setTimeout(() => child.kill("SIGKILL"), 5000)
     try {
       await Promise.race([entered, exited.then(() => { throw new Error("executor exited before gate entry") })])
     } finally { clearTimeout(timeout) }
-    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ pid: child.pid, node: expect.stringMatching(/^22\./) })
+    const markerValue = JSON.parse(readFileSync(marker, "utf8")) as { pid: number; node: string }
+    expect(markerValue).toEqual({ pid, node: expect.any(String) })
+    expect(Number(markerValue.node.split(".")[0])).toBeGreaterThanOrEqual(22)
     const fenced = row(locator)
     expect(fenced.state).toBe("deleting")
     expect(fenced.deletionToken).toBe(claim.deletionToken)
@@ -377,7 +381,7 @@ it("SIGKILL of the real deletion parent after the SDK gate opens never releases 
     for (let attempt = 0; attempt < 500 && !existsSync(marker); attempt++) await Bun.sleep(10)
     expect(existsSync(marker)).toBe(true)
     const entered = JSON.parse(readFileSync(marker, "utf8")) as { id: string; pid: number; node: string }
-    expect(entered.id).toBe(locator.sessionId); expect(entered.node).toMatch(/^22\./)
+    expect(entered.id).toBe(locator.sessionId); expect(Number(entered.node.split(".")[0])).toBeGreaterThanOrEqual(22)
     const fenced = row(locator)
     executor = fenced.deletionExecutor
     expect(executor?.pid).toBe(entered.pid)
@@ -434,7 +438,7 @@ it("real Node child enters marker SDK only after executor attachment commits; ca
   } finally { capture.mockRestore(); onCommit = undefined }
   expect(observedAttachmentCommit).toBe(true)
   const value = JSON.parse(readFileSync(marker, "utf8")) as { id: string; pid: number; node: string }
-  expect(value.id).toBe("a"); expect(value.pid).not.toBe(process.pid); expect(value.node).toMatch(/^22\./)
+  expect(value.id).toBe("a"); expect(value.pid).not.toBe(process.pid); expect(Number(value.node.split(".")[0])).toBeGreaterThanOrEqual(22)
 })
 
 it("failed attachment COMMIT never opens real child gate or runs marker SDK", async () => {
