@@ -225,6 +225,31 @@ describe("Error classification", () => {
   })
 
   describe("Retry-After (#901)", () => {
+    for (const stream of [false, true]) {
+      for (const window of ["unknown", "expired", "current"] as const) {
+        it(`marks only reported exhausted windows as quota (stream=${stream}, window=${window})`, async () => {
+          mockError = new Error('429 Too Many Requests - rate limit exceeded retry-after=55907')
+          if (window !== "unknown") {
+            rateLimitStore.record("default", {
+              status: "rejected", rateLimitType: "five_hour", utilization: 1,
+              resetsAt: Date.now() + (window === "current" ? 7_200_000 : -60_000),
+            })
+          }
+          try {
+            const response: Response = await post(createTestApp(), { ...BASIC_REQUEST, stream })
+            const raw = await response.text()
+            const payload = stream
+              ? raw.split("\n").filter(line => line.startsWith("data:")).map(line => JSON.parse(line.slice(5))).find(event => event.type === "error")
+              : JSON.parse(raw)
+            expect(payload.error.type).toBe("rate_limit_error")
+            expect(payload.error.code).toBe(window === "current" ? "insufficient_quota" : undefined)
+            expect(payload.error.retry_after).toBe(55907)
+          } finally {
+            rateLimitStore.clear("default")
+          }
+        }, 15000)
+      }
+    }
     it("puts a conservative hint on a 429 with no known reset", async () => {
       // A bare 429 gives a concurrent harness nothing to coordinate against:
       // every child backs off on its own schedule and they all wake together.

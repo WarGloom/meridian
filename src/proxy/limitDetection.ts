@@ -16,8 +16,8 @@
  * of the UI is `reported` (Anthropic said so) versus inferred (we worked it
  * out from stale numbers), so every diagnosis carries it explicitly:
  *
- *   1. `sdk_event`     - the SDK's own `rate_limit_event` said `rejected` and
- *                        named `rateLimitType`. Unambiguous.
+ *   1. `sdk_event`     - the SDK's own `rate_limit_event` named a rejected or
+ *                        fully used window with a finite future reset.
  *   2. `error_message` - the CLI's prose names the window. Measured live:
  *                        "You've hit your session limit · resets 12:30am
  *                        (America/Chicago)" - that is both the bucket (Claude
@@ -250,6 +250,7 @@ export function diagnoseLimit(input: DiagnoseLimitInput): LimitDiagnosis {
   const rejected = sdkEntries
     ?.filter(e => e.rateLimitType
       && (e.status === "rejected" || (e.utilization ?? 0) >= 1)
+      && typeof e.resetsAt === "number" && Number.isFinite(e.resetsAt) && e.resetsAt > now
       && now - e.observedAt <= SDK_EVIDENCE_MAX_AGE_MS)
     .sort((a, b) => b.observedAt - a.observedAt)[0]
   if (rejected?.rateLimitType) {

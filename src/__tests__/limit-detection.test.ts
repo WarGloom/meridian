@@ -118,6 +118,31 @@ describe("diagnoseLimit", () => {
     expect(d.source).not.toBe("sdk_event")
   })
 
+  it.each([now - 1, now, undefined, null, Number.NaN, Number.POSITIVE_INFINITY])(
+    "does not report an SDK rejection without a finite future reset (%s)",
+    (resetsAt) => {
+      const d = diagnoseLimit({
+        message: NAMELESS,
+        now,
+        sdkEntries: [{ rateLimitType: "five_hour", status: "rejected", resetsAt, observedAt: now - 1000 }],
+      })
+      expect(d.source).toBe("unknown")
+      expect(d.reported).toBe(false)
+      expect(d.bucket).toBeNull()
+    },
+  )
+
+  it("uses an explicit current named refusal when the SDK snapshot reset has passed", () => {
+    const d = diagnoseLimit({
+      message: WEEKLY_LIMIT,
+      now,
+      sdkEntries: [{ rateLimitType: "five_hour", status: "rejected", resetsAt: now - 1, observedAt: now - 1000 }],
+    })
+    expect(d.source).toBe("error_message")
+    expect(d.bucket).toBe("seven_day")
+    expect(d.reported).toBe(true)
+  })
+
   it("does not treat a healthy SDK entry as evidence of anything", () => {
     const d = diagnoseLimit({
       message: NAMELESS,

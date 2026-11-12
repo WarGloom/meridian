@@ -44,6 +44,13 @@ External plugins depend on these interfaces. **Changes require project owner app
 | ChatGPT additions: OpenAI model ids on `/v1/responses` routed to ChatGPT seats; new `POST /v1/images/generations` and `/v1/images/edits` (ChatGPT only, 404 without it); `/health` `chatgpt` and `backends`; `/profiles/list` entries with `type: "chatgpt"`, `activeProfiles`, `chatgpt.owner`; `provider` on `POST /profiles/active`; `chatgpt` in `GET /inflight`; `/profiles/chatgpt/*`, `/settings/api/chatgpt` | `server.ts`, `upstream/`, `backends/chatgpt.ts`, `chatgpt/` | Additive and absent unless `MERIDIAN_CHATGPT_CREDENTIALS` (or a populated owned store) enables ChatGPT; existing fields keep their meaning: `activeProfile` stays the Claude pointer wherever Claude profiles exist |
 If you need to modify any of these, open an issue first — breaking changes affect downstream plugin authors.
 
+The owner approved an additive Claude `/v1/messages` error distinction.
+JSON and SSE rate-limit errors keep `type: rate_limit_error`. They may include
+`code: insufficient_quota` when Meridian reports a named exhausted or rejected
+usage window from SDK evidence or upstream wording. SDK snapshot evidence needs
+a finite future reset. An expired or missing reset, unknown or inferred window,
+or retry delay alone does not warrant the code.
+
 The owner approved #1446's `/profiles/list` additions on 2026-10-26. Every
 entry gains `duplicateOf` (ids of other profiles signed in to the same account,
 `[]` when none), `duplicateBasis` (`account-organization`, `email-organization`,

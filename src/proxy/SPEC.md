@@ -53,6 +53,12 @@ Contract*, *Cancellation Contract*; public routes and headers are in
 
 ## Decisions
 
+- **Reported usage exhaustion remains distinguishable from throttling.** Claude
+  rate-limit JSON and SSE errors retain `type: rate_limit_error`. They add
+  `code: insufficient_quota` only when `diagnoseLimit` reports a named rejected
+  or exhausted usage window from SDK evidence or upstream wording. SDK snapshot
+  evidence requires a finite future reset. Expired or missing resets, inferred
+  or unknown windows, and retry delays alone do not establish exhaustion.
 - **OpenAI Responses (`/v1/responses`) for Codex** is pure translation
   forwarded in-process to `/v1/messages`, reusing auth, model mapping, sessions
   and the tool loop.
