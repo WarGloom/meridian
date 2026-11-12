@@ -8890,7 +8890,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 if (!(error instanceof UpstreamIdleError)) {
                   safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
                     type: "error",
-                    error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
+                    error: { type: streamErr.type, message: streamErr.message, ...(refusal?.reported && refusal.bucket ? { code: "insufficient_quota" } : {}), ...retryAfterBodyFields(streamRetryAfter) }
                   })}\n\n`), "error_event_before_stop")
                 }
                 safeEnqueue(encoder.encode(
@@ -8901,7 +8901,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 // close — the error event is the whole response.
                 safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
                   type: "error",
-                  error: { type: streamErr.type, message: streamErr.message, ...retryAfterBodyFields(streamRetryAfter) }
+                  error: { type: streamErr.type, message: streamErr.message, ...(refusal?.reported && refusal.bucket ? { code: "insufficient_quota" } : {}), ...retryAfterBodyFields(streamRetryAfter) }
                 })}\n\n`), "error_event")
               }
               if (!streamClosed) {
@@ -9091,6 +9091,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             error: {
               type: classified.type,
               message: classified.message,
+              ...(refusal?.reported && refusal.bucket ? { code: "insufficient_quota" } : {}),
               // Mirrored in the body so one field name means one thing on both
               // the JSON and SSE paths; the header above is the contract.
               ...retryAfterBodyFields(retryAfter),
