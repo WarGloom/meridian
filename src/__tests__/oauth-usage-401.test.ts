@@ -21,6 +21,7 @@ describe("OAuth usage 401 recovery", () => {
       accessToken: "old-access", refreshToken: "fake-refresh",
       expiresAt: Date.now() + 3600_000,
       subscriptionType: "max", rateLimitTier: "default_claude_max_5x",
+      planCheckedAt: Date.now(),
     } }
     store = {
       async read() { return structuredClone(credentials) },
