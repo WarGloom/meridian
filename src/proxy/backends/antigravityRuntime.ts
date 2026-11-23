@@ -687,7 +687,7 @@ export class AntigravityRuntime {
     const options = { env: this.childEnv, signal: this.shutdown.signal }
     this.cliVersion = (await readAgProbe(this.executable, "version", options)).trim()
     // Validate the binary before asking it to inspect subscription configuration.
-    if (this.cliVersion !== "1.5.13") throw new Error(`Unsupported agy version ${this.cliVersion}; this Meridian build validates agy 1.5.13. Validate a CLI upgrade before updating the compatibility gate.`)
+    if (this.cliVersion !== "1.5.13" && this.cliVersion !== "1.5.15") throw new Error(`Unsupported agy version ${this.cliVersion}; this Meridian build validates agy 1.5.13 and 1.5.15. Validate a CLI upgrade before updating the compatibility gate.`)
     const config = await readAgProbe(this.executable, "configuration", options)
     // agy 1.5.5 and 1.5.13 print the effective settings as a TSV block inside `response`,
     // replacing 1.2.7's command.data.config envelope. An explicit `false` credits
