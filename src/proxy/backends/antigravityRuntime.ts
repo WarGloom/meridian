@@ -104,7 +104,7 @@ export class AntigravityRun {
   constructor(readonly runtime: AntigravityRuntime, readonly request: AgRequest, private readonly restored?: AgNativeSnapshot) {
     this.grammars = new AgGrammars(request, this.attachmentAbort.signal)
     this.continuation = restored ? "restored" : "new"
-    if (restored) this.writtenTokens = estimateAgTokens({ ...request, messages: request.messages.slice(0, restored.count) }).input_tokens
+    if (restored) this.writtenTokens = estimateAgTokens({ ...request, messages: request.messages.slice(0, restored.count) }, runtime.options.inlineToolSchemas).input_tokens
     this.reusable = runtime.options.reuseConversations !== false && !request.output_config?.format && !request.stop_sequences?.length
     this.history = request.messages
     this.contract = contractKey(request)
@@ -120,7 +120,7 @@ export class AntigravityRun {
     const native = agNativeTools(this.runtime.options)
     const maxTokens = Math.min(limits.stepTokens, limits.contextTokens - (request.max_tokens ?? 8192) - 32)
     if (maxTokens < 1) throw new AntigravityError("prompt is too long: output reserve exceeds the estimated context budget")
-    const full = renderAgPrompt(request, native) + this.promptSuffix
+    const full = renderAgPrompt(request, native, false, this.runtime.options.inlineToolSchemas) + this.promptSuffix
     if (this.restored) {
       this.checkContext(full, request.max_tokens)
       return [assertAgStep(full, promptBytes, maxTokens)]
@@ -128,11 +128,11 @@ export class AntigravityRun {
     if ((!promptBytes || Buffer.byteLength(full) <= promptBytes) && estimateAgTextTokens(full) <= maxTokens) return [full]
     if (limits.chunked && !request.output_config?.format &&
       !this.runtime.options.allowNativeBrowser && !this.runtime.options.allowNativeSubagents &&
-      estimateAgTokens(request).input_tokens + (request.max_tokens ?? 8192) <= limits.contextTokens) {
-      const steps = planAgHistory(request, native, this.promptSuffix, Math.min(promptBytes || limits.stepBytes, limits.stepBytes), limits.maxSteps, maxTokens)
+      estimateAgTokens(request, this.runtime.options.inlineToolSchemas).input_tokens + (request.max_tokens ?? 8192) <= limits.contextTokens) {
+      const steps = planAgHistory(request, native, this.promptSuffix, Math.min(promptBytes || limits.stepBytes, limits.stepBytes), limits.maxSteps, maxTokens, this.runtime.options.inlineToolSchemas)
       if (steps.reduce((sum, step) => sum + estimateAgTextTokens(step) + 32, 0) + (request.max_tokens ?? 8192) <= limits.contextTokens) return steps
     }
-    return [renderAgColdTrim(request, native, this.promptSuffix, { bytes: promptBytes, tokens: maxTokens, estimateTokens: estimateAgTextTokens })]
+    return [renderAgColdTrim(request, native, this.promptSuffix, { bytes: promptBytes, tokens: maxTokens, estimateTokens: estimateAgTextTokens, inlineToolSchemas: this.runtime.options.inlineToolSchemas })]
   }
   private contextFits(next: number, output?: number): boolean {
     return Math.max(this.writtenTokens, this.reportedInput) + this.outputTokens + next + 32 + (output ?? 8192) <= this.runtime.historyLimits.contextTokens
@@ -142,7 +142,7 @@ export class AntigravityRun {
   }
   fitsContinuation(request: AgRequest): boolean {
     const delta = { ...request, messages: request.messages.slice(this.history.length) }
-    return this.contextFits(estimateAgTokens(delta).input_tokens, request.max_tokens)
+    return this.contextFits(estimateAgTokens(delta, this.runtime.options.inlineToolSchemas).input_tokens, request.max_tokens)
   }
   private writeInput(prompt: string): void {
     this.writtenTokens += estimateAgTextTokens(prompt) + 32
@@ -403,7 +403,7 @@ export class AntigravityRun {
       this.history = request.messages
       this.terminal = false; this.idle = false; this.outputBytes = 0
       this.steps = []; this.stepIndex = 0
-      const prompt = assertAgStep(renderAgPrompt({ ...request, messages: delta }, agNativeTools(this.runtime.options)) + this.promptSuffix, this.runtime.promptBytes, this.runtime.historyLimits.stepTokens)
+      const prompt = assertAgStep(renderAgPrompt({ ...request, messages: delta }, agNativeTools(this.runtime.options), false, this.runtime.options.inlineToolSchemas) + this.promptSuffix, this.runtime.promptBytes, this.runtime.historyLimits.stepTokens)
       this.checkContext(prompt, request.max_tokens)
       this.writeInput(prompt)
       this.runtime.reused++
@@ -759,7 +759,7 @@ export class AntigravityRuntime {
       if (!(await this.availableModels()).includes(request.model)) throw new AntigravityError("Unknown Antigravity model; use GET /v1/models for account model slugs")
       if (this.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
       if (signal?.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
-      const restored = !reusable && estimateAgTokens(request).input_tokens + (request.max_tokens ?? 8192) + 32 <= this.historyLimits.contextTokens ? this.nativeSessions?.claim(request) : undefined
+      const restored = !reusable && estimateAgTokens(request, this.options.inlineToolSchemas).input_tokens + (request.max_tokens ?? 8192) + 32 <= this.historyLimits.contextTokens ? this.nativeSessions?.claim(request) : undefined
       const run = new AntigravityRun(this, request, restored)
       if (restored) this.restored++
       this.runs.set(run.id, run)
@@ -799,7 +799,7 @@ export class AntigravityRuntime {
       if (session) res.setHeader("mcp-session-id", session)
       const scopedId = session ? session + ":" + typeof rpc.id + ":" + rpc.id : rpc.id
       let result: unknown
-      const parallel = parallelAgTool(run.request)
+      const parallel = parallelAgTool(run.request, this.options.inlineToolSchemas)
       const tools = [...availableAgTools(run.request), ...(parallel ? [parallel] : [])]
       if (rpc.method === "initialize") result = { protocolVersion: rpc.params?.protocolVersion ?? "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "meridian-client-tools", version: "1" } }
       else if (rpc.method === "tools/list") result = { tools: tools.map(t => ({ name: t.name, description: t.description ?? t.name, inputSchema: t.input_schema })) }

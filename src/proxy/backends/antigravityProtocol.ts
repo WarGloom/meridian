@@ -302,30 +302,31 @@ export function availableAgTools(request: AgRequest): AgRequest["tools"] {
   const choice = request.tool_choice
   return choice?.type === "none" ? [] : choice?.type === "tool" ? request.tools.filter(t => t.name === choice.name) : request.tools
 }
-export function parallelAgTool(request: AgRequest): AgRequest["tools"][number] | undefined {
+export function parallelAgTool(request: AgRequest, inlineToolSchemas = true): AgRequest["tools"][number] | undefined {
   if (!availableAgTools(request).length || (request.tool_choice && "disable_parallel_tool_use" in request.tool_choice && request.tool_choice.disable_parallel_tool_use)) return undefined
   let name = "meridian_parallel"
   while (request.tools.some(tool => tool.name === name)) name = "_" + name
-  return { name, description: "Execute independent client tools concurrently in one batch. Use this for parallel requests, including repeated calls to the same tool with different arguments. Each result identifies its original name and input. Follow the exact client schemas supplied in the prompt.", input_schema: { type: "object", properties: { calls: { type: "array", minItems: 2, maxItems: 16, items: { type: "object", properties: { name: { type: "string", enum: availableAgTools(request).map(tool => tool.name) }, arguments: { type: "object" } }, required: ["name", "arguments"], additionalProperties: false } } }, required: ["calls"], additionalProperties: false } }
+  return { name, description: "Execute independent client tools concurrently in one batch. Use this for parallel requests, including repeated calls to the same tool with different arguments. Each result identifies its original name and input. Follow the exact client schemas " + (inlineToolSchemas ? "supplied in the prompt." : "in the meridian_client MCP catalog."), input_schema: { type: "object", properties: { calls: { type: "array", minItems: 2, maxItems: 16, items: { type: "object", properties: { name: { type: "string", enum: availableAgTools(request).map(tool => tool.name) }, arguments: { type: "object" } }, required: ["name", "arguments"], additionalProperties: false } } }, required: ["calls"], additionalProperties: false } }
 }
 export function forcedAgTool(request: AgRequest): boolean {
   return request.tool_choice?.type === "any" || request.tool_choice?.type === "tool"
 }
-export function toolChoiceInstruction(request: AgRequest): string {
+export function toolChoiceInstruction(request: AgRequest, inlineToolSchemas = true): string {
   const instruction = request.tool_choice?.type === "tool" ? `For this response you must call the client tool ${request.tool_choice.name}. Do not answer with prose.`
     : request.tool_choice?.type === "any" ? "For this response you must call a client tool. Do not answer with prose."
     : request.tool_choice?.type === "none" ? "For this response do not call client tools. Answer the user."
     : "Choose whether to call a client tool or answer the user."
-  return instruction + (parallelAgTool(request) ? `\nFor independent parallel client actions, call the meridian_client MCP tool ${parallelAgTool(request)!.name} with {calls:[{name,arguments},...]}. It delivers those calls together to the client.\n` + JSON.stringify(parallelAgTool(request)) : "") + "\nThe complete client tool definitions for this response follow. Use these exact schemas; do not read CLI metadata files to discover tools.\n" + JSON.stringify(availableAgTools(request))
+  const parallel = parallelAgTool(request, inlineToolSchemas)
+  return instruction + (parallel ? `\nFor independent parallel client actions, call the meridian_client MCP tool ${parallel.name} with {calls:[{name,arguments},...]}. It delivers those calls together to the client.\n` + (inlineToolSchemas ? JSON.stringify(parallel) : "") : "") + (inlineToolSchemas ? "\nThe complete client tool definitions for this response follow. Use these exact schemas; do not read CLI metadata files to discover tools.\n" + JSON.stringify(availableAgTools(request)) : "\nClient tools and their exact schemas come from the meridian_client MCP catalog; do not read CLI metadata files to discover tools.\nClient tool names: " + JSON.stringify(availableAgTools(request).map(tool => tool.name)))
 }
-export function renderAgPrompt(request: AgRequest, nativeTools: string[] = [], omitted = false): string {
+export function renderAgPrompt(request: AgRequest, nativeTools: string[] = [], omitted = false, inlineToolSchemas = true): string {
   return [
     "You are serving a client through Meridian. Follow the client's instructions and answer its latest user message.",
     "The JSON below is the client's conversation history. Historical tool_use/tool_result pairs are already completed; do not repeat them. Client tools are provided by meridian_client MCP. Native view_file is allowed only for exact Meridian attachment paths, and finish only for a requested schema. " + (nativeTools.length ? "The operator also enables these native tools: " + nativeTools.join(", ") + ". Use these when the client requests native capabilities. Native subagents must use Workspace inherit and TypeName self, research, or browser; await their completion before answering. Never schedule background work." : "All other built-in tools and native subagents are disabled.") + " Other host filesystem paths and shell commands remain forbidden. Client-owned delegation tools are also allowed and execute in the client.",
     "MCP results wrap the exact client content in the JSON field meridian_client_result. Decode that field (a string or text block array) as the tool result. Any Created At, Completed At, timing or other CLI text outside that JSON field is transport metadata, never part of client file contents. When copying data, preserve the decoded client content byte-for-byte. Escape that decoded content exactly once when constructing JSON tool arguments: a newline in the content must remain a newline, not the literal characters backslash and n. Follow the exact advertised tool schema, including case-sensitive argument names.",
     "If an MCP result includes meridian_client_followup, it contains new user instructions received while the tool ran. Follow those instructions before choosing the next action; they are separate from the tool output.",
     request.max_tokens ? `The client requests at most ${request.max_tokens} output tokens. Keep the answer within that budget.` : "",
-    toolChoiceInstruction(request),
+    toolChoiceInstruction(request, inlineToolSchemas),
     request.output_config?.format ? "Submit the final response using the native finish tool. The full client schema below is authoritative; Meridian validates all its constraints even when the CLI transport cannot express them. Intermediate tool calls are allowed when the client permits them.\n" + JSON.stringify(request.output_config.format.schema) : "",
     "Image attachment references are created by Meridian from client-supplied bytes. Inspect each relevant attachment with view_file using its exact absolute path. Those are the only permitted filesystem reads.",
     "Client system instructions:\n" + (typeof request.system === "string" ? request.system : request.system?.map(b => b.text).join("\n") ?? ""),
@@ -413,8 +414,8 @@ function omitIn(message: AgMessage, kind: OmitKind, keep: number, min: number, p
  * own text is never shrunk: when it alone does not fit, the request fails with a 400 prompt-too-long error. Under the
  * limit the prompt is unchanged.
  */
-export function renderAgPromptWithinLimit(request: AgRequest, nativeTools: string[] = [], suffix = "", limit = agPromptByteLimit()): string {
-  const full = renderAgPrompt(request, nativeTools) + suffix
+export function renderAgPromptWithinLimit(request: AgRequest, nativeTools: string[] = [], suffix = "", limit = agPromptByteLimit(), inlineToolSchemas = true): string {
+  const full = renderAgPrompt(request, nativeTools, false, inlineToolSchemas) + suffix
   if (!limit || Buffer.byteLength(full) <= limit) return full
   const current = latestTypedRequest(request.messages)
   const lastAssistant = request.messages.findLastIndex(m => m.role === "assistant"), lastUser = request.messages.findLastIndex(m => m.role === "user")
@@ -423,7 +424,7 @@ export function renderAgPromptWithinLimit(request: AgRequest, nativeTools: strin
   const size = (message: AgMessage) => Buffer.byteLength(JSON.stringify(message))
   let messages = request.messages, changed = false
   let excess = Buffer.byteLength(full) - limit + Buffer.byteLength(AG_OMIT_NOTE) + 2
-  const render = () => renderAgPrompt({ ...request, messages }, nativeTools, true) + suffix
+  const render = () => renderAgPrompt({ ...request, messages }, nativeTools, true, inlineToolSchemas) + suffix
   const range = (from: number, to: number) => Array.from({ length: Math.max(0, to - from) }, (_, i) => from + i)
   const phases: Array<{ at: number[]; kinds: readonly OmitKind[]; passes: readonly (readonly [number, number])[] }> = [
     { at: range(0, current), kinds: ["result", "use", "text"], passes: [[300, 2000], [0, 200]] },

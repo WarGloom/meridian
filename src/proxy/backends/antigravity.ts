@@ -104,7 +104,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       }
       const followup = suffix.map(message => ({ ...message, content: blocks(message).filter(b => b.type === "text" || b.type === "image" || b.type === "document" || b.type === "audio" || b.type === "video") })).filter(message => message.content.length > 0)
       if (JSON.stringify(run.request.tool_choice) !== JSON.stringify(body.tool_choice)) {
-        followup.push({ role: "user", content: [{ type: "text", text: toolChoiceInstruction(body) }] })
+        followup.push({ role: "user", content: [{ type: "text", text: toolChoiceInstruction(body, runtime.options.inlineToolSchemas) }] })
       }
       run.request.tool_choice = body.tool_choice
       run.busy = true
@@ -338,14 +338,14 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       }
       if (request.method === "POST" && path === "/v1/messages/count_tokens") {
         const { request: parsed, droppedTools } = parseAgRequestWithMeta(await readBody(request), runtime.options.adaptThinkingBudgets)
-        return Response.json(estimateAgTokens(parsed), {
+        return Response.json(estimateAgTokens(parsed, runtime.options.inlineToolSchemas), {
           headers: {
             "x-meridian-token-count": "estimate",
             ...droppedToolHeaders(droppedTools),
           },
         })
       }
-      if (request.method === "POST" && path === "/v1/responses/input_tokens") return await agOpenai(request, await readBody(request), true, request => messages(request, false), responses, responseJobs, { countTokens: true })
+      if (request.method === "POST" && path === "/v1/responses/input_tokens") return await agOpenai(request, await readBody(request), true, request => messages(request, false), responses, responseJobs, { countTokens: true, inlineToolSchemas: runtime.options.inlineToolSchemas })
       const storedResponse = /^\/v1\/responses\/(resp_agy_[a-f0-9]{32})(?:\/(input_items|cancel))?$/.exec(path)
       if (storedResponse) {
         const id = storedResponse[1]!, operation = storedResponse[2]

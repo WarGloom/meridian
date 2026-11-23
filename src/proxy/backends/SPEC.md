@@ -77,6 +77,12 @@ result duplicate guards and response snapshots remain in force; native-capabilit
 
 ## Input and context budgets
 
+Client tool schemas are embedded in prompts by default. Set
+`MERIDIAN_AGY_INLINE_TOOL_SCHEMAS=0` or `antigravity.inlineToolSchemas: false`
+to send names instead and rely on the `meridian_client` MCP catalog for exact
+schemas. Prompt rendering, replay and continuation budgets use the selected
+representation. Client tool validation remains unchanged.
+
 Keep the existing byte guard and apply a separate estimated token guard to
 submitted inputs. The count endpoint and the guard use a conservative estimate
 that accounts for dense Unicode text. Neither supplies the provider tokenizer.

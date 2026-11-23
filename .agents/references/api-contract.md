@@ -123,6 +123,11 @@ of Anthropic numeric thinking budgets to Gemini effort variants. Response header
 and health expose adaptation; effective model IDs appear in responses and telemetry.
 Strict rejection remains the default; this does not provide native token limits.
 
+`antigravity.inlineToolSchemas` defaults to true. Setting it to false, or setting
+`MERIDIAN_AGY_INLINE_TOOL_SCHEMAS=0`, omits client tool schemas from submitted
+prompts and uses the `meridian_client` MCP catalog instead. An explicit backend
+option takes precedence over the environment variable.
+
 Antigravity token counts are planning estimates. `estimation.method` now
 identifies the ASCII byte/4 estimate plus a conservative non-ASCII UTF-8 byte
 allowance. Dense Unicode input can return a higher estimate and hit the per-step

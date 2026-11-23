@@ -62,7 +62,7 @@ const responsesSchema = z.object({
 }).strict()
 
 /** Provider-specific validation prevents generic converters silently dropping unsupported fields. */
-export async function agOpenai(request: Request, raw: unknown, responses: boolean, messages: (request: Request) => Promise<Response>, store: AgResponseStore, jobs?: AgResponseJobs, execution?: { id?: string; background?: boolean; countTokens?: boolean }): Promise<Response> {
+export async function agOpenai(request: Request, raw: unknown, responses: boolean, messages: (request: Request) => Promise<Response>, store: AgResponseStore, jobs?: AgResponseJobs, execution?: { id?: string; background?: boolean; countTokens?: boolean; inlineToolSchemas?: boolean }): Promise<Response> {
   const parsed = responses ? responsesSchema.safeParse(raw) : chatSchema.safeParse(raw)
   if (!parsed.success) throw new AntigravityError('Unsupported OpenAI request: ' + parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; '))
   const data = parsed.data
@@ -156,7 +156,7 @@ export async function agOpenai(request: Request, raw: unknown, responses: boolea
     output_config: { ...translated.output_config, ...(effort ? { effort } : {}), ...(outputFormat?.type === 'json_schema' ? { format: { type: 'json_schema', schema: outputFormat.schema } } : {}) },
   }
   const validatedBody = parseAgRequest(body)
-  if (execution?.countTokens) return Response.json({ object: 'response.input_tokens', ...estimateAgTokens(validatedBody) }, { headers: { 'x-meridian-token-count': 'estimate' } })
+  if (execution?.countTokens) return Response.json({ object: 'response.input_tokens', ...estimateAgTokens(validatedBody, execution.inlineToolSchemas) }, { headers: { 'x-meridian-token-count': 'estimate' } })
   if (responseRequest?.background) {
     if (!jobs) throw new AntigravityError('Background response service unavailable', 503)
     if (responseRequest.store === false) throw new AntigravityError('Background responses require store: true')

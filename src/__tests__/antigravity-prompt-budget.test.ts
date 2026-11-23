@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test"
 import { AG_MAX_PROMPT_BYTES, AntigravityError, agPromptByteLimit, parseAgRequest, renderAgPrompt, renderAgPromptWithinLimit } from "../proxy/backends/antigravityProtocol"
+import { renderAgColdTrim } from "../proxy/backends/antigravityColdTrim"
+import { planAgHistory } from "../proxy/backends/antigravityHistory"
+import { estimateAgTextTokens } from "../proxy/backends/antigravityTokens"
+import { resolveBackendConfig } from "../proxy/types"
 
 // agy keeps only about 192,000 bytes of one user input step and silently drops the rest, which is the end of the history:
 // the newest messages and tool results. Past the limit Meridian shrinks the oldest large content itself instead.
@@ -26,6 +30,45 @@ const agentic = (rounds: number, size: number, lastSize = size) => {
 const resultAt = (history: Hist, round: number) => String(history[2 + 2 * round]!.content[0].content)
 
 describe("Antigravity prompt byte limit", () => {
+  it("uses the MCP catalog instead of client schemas when explicitly disabled", () => {
+    const request = parseAgRequest({ model: "fixture-model", messages: [{ role: "user", content: "run" }], tools: [{ name: "lookup", input_schema: { type: "object", properties: { unique_schema_field: { type: "string" } } } }] })
+    const defaultPrompt = renderAgPrompt(request)
+    const explicitPrompt = renderAgPrompt(request, [], false, true)
+    const compactPrompt = renderAgPrompt(request, [], false, false)
+    expect(defaultPrompt).toBe(explicitPrompt)
+    expect(defaultPrompt).toContain("unique_schema_field")
+    expect(compactPrompt).not.toContain("unique_schema_field")
+    expect(compactPrompt).toContain('"lookup"')
+    expect(compactPrompt).toContain("meridian_parallel")
+    const forced = renderAgPrompt({ ...request, tool_choice: { type: "tool", name: "lookup" } }, [], false, false)
+    expect(forced).toContain("lookup")
+    expect(forced).not.toContain("unique_schema_field")
+  })
+
+  it("admits a large system and tool catalog when inline schemas are disabled", () => {
+    const request = parseAgRequest({ model: "fixture-model", system: "s".repeat(151_000), messages: [{ role: "user", content: "run" }], tools: [{ name: "lookup", input_schema: { type: "object", properties: { value: { type: "string", description: "d".repeat(76_000) } } } }] })
+    const budget = { bytes: AG_MAX_PROMPT_BYTES, tokens: 52_000, estimateTokens: estimateAgTextTokens }
+    expect(Buffer.byteLength(renderAgPrompt(request))).toBeGreaterThan(AG_MAX_PROMPT_BYTES)
+    expect(() => renderAgColdTrim(request, [], "", budget)).toThrow("prompt is too long")
+    const compact = renderAgColdTrim(request, [], "", { ...budget, inlineToolSchemas: false })
+    expect(Buffer.byteLength(compact)).toBeLessThanOrEqual(AG_MAX_PROMPT_BYTES)
+    expect(planAgHistory(request, [], "", AG_MAX_PROMPT_BYTES, 12, 52_000, false)).toEqual([compact])
+    expect(renderAgPromptWithinLimit(request, [], "", AG_MAX_PROMPT_BYTES, false)).toBe(compact)
+  })
+
+  it("resolves the environment switch and the embedder override", () => {
+    const previous = process.env.MERIDIAN_AGY_INLINE_TOOL_SCHEMAS
+    try {
+      delete process.env.MERIDIAN_AGY_INLINE_TOOL_SCHEMAS
+      expect(resolveBackendConfig({ backend: "antigravity" }).antigravity?.inlineToolSchemas).toBe(true)
+      process.env.MERIDIAN_AGY_INLINE_TOOL_SCHEMAS = "0"
+      expect(resolveBackendConfig({ backend: "antigravity" }).antigravity?.inlineToolSchemas).toBe(false)
+      expect(resolveBackendConfig({ backend: "antigravity", antigravity: { inlineToolSchemas: true } }).antigravity?.inlineToolSchemas).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.MERIDIAN_AGY_INLINE_TOOL_SCHEMAS
+      else process.env.MERIDIAN_AGY_INLINE_TOOL_SCHEMAS = previous
+    }
+  })
   it("leaves a prompt that fits byte-for-byte unchanged", () => {
     const request = session(3, 1000)
     expect(renderAgPromptWithinLimit(request, [], "\nsuffix")).toBe(renderAgPrompt(request, []) + "\nsuffix")

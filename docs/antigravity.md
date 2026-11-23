@@ -208,6 +208,7 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_GRAMMAR_PYTHON` | unset | Local Python with Lark installed for Lark custom-tool validation |
 | `MERIDIAN_AGY_PATH` | `agy` | Official CLI executable |
 | `MERIDIAN_AGY_ALLOW_TOOL_BRIDGE` | off | Explicit tool bridge permission opt-in |
+| `MERIDIAN_AGY_INLINE_TOOL_SCHEMAS` | `1` | Set to `0` to list client tool names instead of embedding their schemas in each prompt. The exact schemas remain available through the `meridian_client` MCP catalog. Embedders can set `antigravity.inlineToolSchemas`. |
 | `MERIDIAN_AGY_ALLOW_NATIVE_BROWSER` | off | Isolated native browser opt-in |
 | `MERIDIAN_AGY_BROWSER_MCP_PATH` | `chrome-devtools-mcp` | Installed Chrome DevTools MCP 1.9.0 executable |
 | `MERIDIAN_AGY_ALLOW_NATIVE_SUBAGENTS` | off | Guarded native self/research subagent opt-in |

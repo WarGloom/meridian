@@ -37,16 +37,16 @@ function expectPairs(messages: AgMessage[]) {
   expect(pending.size).toBe(0)
 }
 
-async function fixture(priming?: string, persist = false) {
+async function fixture(priming?: string, persist = false, inlineToolSchemas = true) {
   const directory = await mkdtemp(join(tmpdir(), "agy-context-budget-"))
   const path = join(directory, "steps.jsonl")
-  const runtime = new AntigravityRuntime({ executable, allowToolBridge: true, turnTimeoutMs: 5000, statePath: persist ? join(directory, "state.sqlite") : undefined })
+  const runtime = new AntigravityRuntime({ executable, allowToolBridge: true, turnTimeoutMs: 5000, inlineToolSchemas, statePath: persist ? join(directory, "state.sqlite") : undefined })
   runtime.childEnv.AGY_FIXTURE_CONTEXT_LOG = path
   if (priming) runtime.childEnv.AGY_FIXTURE_CONTEXT_PRIMING = priming
   const backend = createAntigravityServer({ ...DEFAULT_PROXY_CONFIG, backend: "antigravity" }, runtime)
   cleanup.push(backend.closeBackend, () => rm(directory, { recursive: true, force: true }))
-  const send = (messages: AgMessage[]) => backend.app.fetch(new Request("http://local/v1/messages", {
-    method: "POST", body: JSON.stringify({ model: "fixture-model", tools, max_tokens: 128, messages }),
+  const send = (messages: AgMessage[], overrides: object = {}) => backend.app.fetch(new Request("http://local/v1/messages", {
+    method: "POST", body: JSON.stringify({ model: "fixture-model", tools, max_tokens: 128, messages, ...overrides }),
   }))
   const steps = async (): Promise<{ pid: number; prompt: string }[]> =>
     (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line))
@@ -54,6 +54,24 @@ async function fixture(priming?: string, persist = false) {
 }
 
 describe("Antigravity context budgeting", () => {
+  it("submits large catalog-backed inputs on cold and warm turns", async () => {
+    const { send, steps } = await fixture(undefined, false, false)
+    const overrides = { system: "s".repeat(151_000), tools: [{ name: "lookup", input_schema: { type: "object", properties: { key: { type: "string", description: "d".repeat(76_000) } } } }] }
+    const first = [text("SKIP_TOOLS first")]
+    const response = await send(first, overrides)
+    expect(response.status).toBe(200)
+    const answer = await response.json() as { content: { text: string }[] }
+    const next = await send([...first, assistant(answer.content[0]!.text), text("SKIP_TOOLS second")], overrides)
+    expect(next.status).toBe(200)
+    const frames = await steps()
+    expect(frames).toHaveLength(2)
+    expect(frames[1]!.pid).toBe(frames[0]!.pid)
+    for (const frame of frames) {
+      expect(Buffer.byteLength(frame.prompt)).toBeLessThanOrEqual(190_000)
+      expect(frame.prompt).not.toContain("d".repeat(100))
+      expect(frame.prompt).toContain('"lookup"')
+    }
+  })
   it("defaults to one bounded cold input with the newest request and intact tool pairs", async () => {
     const { send, steps } = await fixture()
     const result = await send([text("EARLIEST"), ...historicalPairs(48, "\u6f22".repeat(1700)), assistant("Done"), text("SKIP_TOOLS CURRENT_TAIL")])
