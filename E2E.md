@@ -9773,6 +9773,28 @@ and reports `NEWEST_TURN_LOST`) and once against the candidate (which shrinks
 the oldest tool results first to ~170 KB and reports `NEWEST_TURN_DELIVERED`
 with `newestTail: true`, `oldestHead: true`, `nonce: true`, and `toolCalls: 0`).
 
+**Verified 2026-11-24 (oversized newest step):** Run a private source Meridian
+with `bun --no-env-file -e` calling `startProxyServer` with backend
+`antigravity`, loopback port `0` and the tool bridge enabled. Use temporary XDG
+roots, a private `MERIDIAN_AGY_STATE_PATH`, a disposable copy-on-write agy
+home and `AGY_CLI_DISABLE_AUTO_UPDATE=true`. Set chunked replay on, inline
+schemas off, and step and context estimates to 63,000 and 512,000 tokens.
+
+On Linux x64 with agy 1.5.16 and `gemini-4-neon-xhigh`, send `POST /v1/messages`
+asking the model to call a client fixture tool. Reply with its call ID, two
+random 36-character UUID receipts, and about 320 KB of generated filler.
+Require the final response to report both receipts and the omitted-byte count.
+Send a normal next turn, then a new typed message of the same size. Require
+HTTP 400 `invalid_request_error` with `x-should-retry: false`. Keep the rejected
+message in the body and append a normal turn to prove the session can continue.
+
+The 320,120-byte result completed through `history-replay`: the emitted step
+was 180,000 bytes, and the model reported both receipts and the marker's count.
+The next turn completed. The 320,028-byte typed message was rejected; the next
+turn completed with the rejected message still in history. A small planned
+frame was byte-identical before and after. Native tool grants were disabled.
+
+
 
 ## Maintained actual-client profile history probe
 

@@ -219,12 +219,14 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_TURN_MAX_DURATION_MS` | `7200000` | Absolute per-turn deadline including client tool waits; also passed as CLI `--print-timeout` on every turn (including tool-less turns) |
 | `MERIDIAN_AGY_TOOL_TIMEOUT_MS` | `60000` | Pending client tool-result deadline |
 | `MERIDIAN_AGY_IDLE_CONVERSATION_MS` | tool timeout | How long a completed conversation keeps its live process for the next turn (explicit values: 1–86400000); afterwards that turn replays the full history. Unset preserves the existing tool timeout, including values above this new option's limit. |
-| `MERIDIAN_AGY_MAX_PROMPT_BYTES` | `190000` | UTF-8 byte limit of one prompt sent to agy, which keeps only about 192,000 bytes of an input step and drops the rest (the newest messages). Past it the oldest large tool results, arguments and text are shortened, the newest last; a current request that alone does not fit returns 400 `prompt is too long`. `0` disables it. |
+| `MERIDIAN_AGY_MAX_PROMPT_BYTES` | `190000` | Optional lower UTF-8 byte bound. `0` disables this secondary bound, not `MERIDIAN_AGY_HISTORY_STEP_BYTES`. |
 | `MERIDIAN_AGY_MAX_STEP_TOKENS` | `52000` | Estimated tokens per submitted input, independently of the byte guard; 1–63000. |
 | `MERIDIAN_AGY_MAX_CONTEXT_TOKENS` | `480000` | Estimated context safety budget derived from a 512K model window; 1–512000. Includes an output reserve. This is not a provider limit or a retention guarantee. |
 | `MERIDIAN_AGY_CHUNKED_HISTORY` | `0` | Set to `1` to opt into experimental multi-step cold replay. The default is one trimmed input. |
-| `MERIDIAN_AGY_HISTORY_STEP_BYTES` | `180000` | Extra byte bound for each experimental replay input; 1–190000. |
+| `MERIDIAN_AGY_HISTORY_STEP_BYTES` | `180000` | UTF-8 byte bound for all agy inputs, including warm client tool batches; 1–190000. |
 | `MERIDIAN_AGY_HISTORY_MAX_STEPS` | `12` | Total experimental replay inputs including the final request; 1–64. |
+
+Meridian keeps the head and tail of oversized historical text and tool results and marks the omission. An oversized new typed message returns a 400: shorten it or put the content into a file and reference the file.
 
 Capacity exhaustion returns 429 with `Retry-After`. No unbounded request queue
 is created. Bodies are capped at 8 MiB; upstream stdout is capped at 16 MiB.
