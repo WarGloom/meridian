@@ -325,9 +325,9 @@ app does not collect Google credentials or repurpose Claude profile login.
 
 ## Compatibility and operational contract
 
-The supported text/client-tools path is gated to official `agy` **1.5.13**
-(validated on Linux x64; the macOS 1.2.7 acceptance below predates the gate
-moves and awaits a 1.5.13 re-run on that platform).
+The text/client-tools gate accepts official `agy` **1.5.13**, **1.5.15**, and **1.5.16**.
+The macOS 1.2.7 acceptance below predates these gate moves and awaits a 1.5.13
+re-run on that platform.
 An unverified CLI update is refused before a new model process starts. Validate
 new versions with the live gates below before changing the compatibility gate.
 `/health` still reports Linux as `preview` and macOS as `supported` until each

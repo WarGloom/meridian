@@ -2,7 +2,8 @@
 
 Meridian uses the official, signed-in `agy` CLI for subscription-backed generation.
 It does not use a Google model SDK, copy credentials, or fall back to a paid API.
-The validated CLI version is **1.5.13** (Linux x64, Pi **1.3.0**). Earlier
+The compatibility gate accepts **1.5.13**, **1.5.15**, and **1.5.16**.
+Full Pi client evidence covers **1.5.13** (Linux x64, Pi **1.3.0**). Earlier
 evidence covers **agy 1.2.7** with **Pi 0.72.1** and **OpenCode V1 1.18.31** on
 macOS arm64; that platform still needs a 1.5.13 re-run. See [live evidence](../E2E.md) and the
 [setup guide](antigravity.md). New CLI versions require validation.

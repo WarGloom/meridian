@@ -962,6 +962,14 @@ the read/write loop. The CLI version was unchanged across the run. The 1.5.13
 `TSV_EFFECTIVE_SETTINGS_OBSERVED` with `useG1Credits` `false` and no model
 commands.
 
+**Verified 2026-11-24 (agy 1.5.16 gate move):** Linux x64, Bun 1.4.4, and a
+private standalone Meridian from source. The CLI reported 1.5.16; `/config`
+returned `SUCCESS` with TSV settings and `useG1Credits` set to `false`.
+Model discovery and quota parsing passed. Two HTTP Messages requests to
+`gemini-3.8-flash-low` returned a client tool call, then the exact receipt
+supplied in its correlated tool result. This was a direct HTTP bridge check,
+not a Pi or OpenCode client run.
+
 The extended native gate runs the actual macOS app with disposable app data and
 an app-managed combined service:
 
@@ -1185,7 +1193,7 @@ bun scripts/e2e-antigravity-active-history.mjs
 Use Bun 1.4.3, Pi 1.1.0 and the official agy 1.2.7 Darwin arm64 binary.
 This gate is frozen to agy 1.2.7 (version and binary-hash asserts); like the
 idle-conversation gate it needs a macOS 1.5.13 refresh before it can run
-against a current build, which pins 1.5.13.
+against a current build, which refuses 1.2.7.
 The gate requires the default subscription with paid credits/custom providers disabled,
 imports the retained public long-history fixture, and requires one exact write
 and a correlated read after joined backend replacement. The newest request,
