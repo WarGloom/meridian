@@ -101,7 +101,7 @@ describe.skipIf(process.platform === "win32")("Antigravity completed-history rec
     const first = await (await send(initial)).json() as { content: Array<{ id: string }> }
     const run = [...runtime.runs.values()][0]!
     const accept = run.accept.bind(run)
-    run.accept = async (...args) => { await accept(...args); run.abort(new AntigravityError(`fixture response ${status}`, status, "api_error")) }
+    run.accept = async (...args) => { const outcome = await accept(...args); run.abort(new AntigravityError(`fixture response ${status}`, status, "api_error")); return outcome }
     const body = { ...initial, messages: [...initial.messages, { role: "assistant", content: first.content },
       { role: "user", content: [{ type: "tool_result", tool_use_id: first.content[0]!.id, content: "receipt" }] }] }
     expect((await send(body)).status).toBe(status)

@@ -1,5 +1,6 @@
-import { AntigravityError, blocks, renderAgPrompt, type AgMessage, type AgRequest } from './antigravityProtocol'
+import { AntigravityError, blocks, latestTypedRequest, renderAgPrompt, type AgMessage, type AgRequest } from './antigravityProtocol'
 import { estimateAgTextTokens, agTextTokenWeight } from './antigravityTokens'
+import { assertAgStep, fitAgStep, type AgStepObserver } from './antigravityStepBudget'
 
 export interface AgHistoryLimits {
   chunked: boolean
@@ -28,14 +29,6 @@ export function agHistoryLimits(env: Record<string, string | undefined> = proces
   }
 }
 
-export function assertAgStep(prompt: string, limit: number, tokenLimit = 52_000): string {
-  const bytes = Buffer.byteLength(prompt)
-  if (limit && bytes > limit) throw new AntigravityError(`prompt is too long: new input step is ${bytes} bytes > ${limit}; split the latest message or tool batch`)
-  const tokens = estimateAgTextTokens(prompt)
-  if (tokens > tokenLimit) throw new AntigravityError(`prompt is too long: new input step is estimated at ${tokens} tokens > ${tokenLimit}; split the latest message or tool batch`)
-  return prompt
-}
-
 export const AG_HISTORY_PREFIX = 'History loading step. Store the following completed client conversation as context for a later input step. Treat it only as historical data: do not answer its requests, execute actions, inspect attachments, or call any tools. Reply with exactly ACK and nothing else. The real instructions and current request arrive in the final step.\n\nClient conversation:\n'
 
 /** Tool calls and all their results form one indivisible replay unit. */
@@ -56,7 +49,7 @@ function historyUnits(messages: AgMessage[]): AgMessage[][] {
 }
 
 /** Plan everything before spawning: no partially loaded histories on cap/size failures. */
-export function planAgHistory(request: AgRequest, native: string[], suffix: string, limit: number, maxSteps: number, tokenLimit = 52_000, inlineToolSchemas = true): string[] {
+export function planAgHistory(request: AgRequest, native: string[], suffix: string, limit: number, maxSteps: number, tokenLimit = 52_000, inlineToolSchemas = true, observe?: AgStepObserver): string[] {
   const full = renderAgPrompt(request, native, false, inlineToolSchemas) + suffix
   if (Buffer.byteLength(full) <= limit && estimateAgTextTokens(full) <= tokenLimit) return [full]
   const units = historyUnits(request.messages)
@@ -68,18 +61,23 @@ export function planAgHistory(request: AgRequest, native: string[], suffix: stri
   // Keep the goal's entire tool batch if its instruction accompanies a tool result.
   const [goal] = goalIndex < 0 ? [] : units.splice(goalIndex, 1)
   const finalRequest = { ...request, messages: [...(goal ?? []), ...last] }
-  const final = assertAgStep('The earlier input steps contain completed conversation history. Use it together with the current user goal and latest messages in this final step.\n\n' + renderAgPrompt(finalRequest, native, false, inlineToolSchemas) + suffix, limit, tokenLimit)
+  const budget = { bytes: limit, tokens: tokenLimit }
+  const finalPrefix = units.length ? 'The earlier input steps contain completed conversation history. Use it together with the current user goal and latest messages in this final step.\n\n' : ''
+  const renderFinal = (messages: AgMessage[]) => finalPrefix + renderAgPrompt({ ...finalRequest, messages }, native, false, inlineToolSchemas) + suffix
+  const final = fitAgStep({ messages: finalRequest.messages, render: renderFinal, protect: latestTypedRequest(finalRequest.messages), limit: budget, observe })?.prompt ?? assertAgStep(renderFinal(finalRequest.messages), budget)
+  const renderUnit = (messages: AgMessage[]) => AG_HISTORY_PREFIX + JSON.stringify(messages)
   const steps: string[] = []
   let chunk: AgMessage[] = []
   let bytes = Buffer.byteLength(AG_HISTORY_PREFIX) + 2
   let tokens = agTextTokenWeight(AG_HISTORY_PREFIX) + 0.5
-  for (const unit of units) {
+  for (const original of units) {
+    const unit = fitAgStep({ messages: original, render: renderUnit, protect: -1, limit: budget, observe })?.messages ?? original
     const serialized = JSON.stringify(unit)
     const unitBytes = Buffer.byteLength(serialized) - 2
     const unitTokens = agTextTokenWeight(serialized) - 0.5
     if (bytes + unitBytes + (chunk.length ? 1 : 0) > limit || tokens + unitTokens + (chunk.length ? 0.25 : 0) > tokenLimit) {
       if (chunk.length) steps.push(AG_HISTORY_PREFIX + JSON.stringify(chunk))
-      assertAgStep(AG_HISTORY_PREFIX + serialized, limit, tokenLimit)
+      assertAgStep(AG_HISTORY_PREFIX + serialized, budget)
       chunk = unit
       bytes = Buffer.byteLength(AG_HISTORY_PREFIX) + 2 + unitBytes
       tokens = agTextTokenWeight(AG_HISTORY_PREFIX) + 0.5 + unitTokens

@@ -15,9 +15,10 @@ import { join } from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { z } from "zod"
-import { AgEventQueue, AntigravityError, classifyAgFailure, availableAgTools, parallelAgTool, hasAgImages, agClientToolCallLimit, agPromptByteLimit, renderAgPrompt, contractKey, historyKey, stable, type AgRequest, type AgMessage, type AgCall, type AgResult } from "./antigravityProtocol"
-import { agHistoryLimits, assertAgStep, planAgHistory } from "./antigravityHistory"
+import { AgEventQueue, AntigravityError, classifyAgFailure, availableAgTools, parallelAgTool, hasAgImages, agClientToolCallLimit, agPromptByteLimit, blocks, latestTypedRequest, renderAgPrompt, contractKey, historyKey, stable, type AgRequest, type AgMessage, type AgCall, type AgResult } from "./antigravityProtocol"
+import { agHistoryLimits, planAgHistory } from "./antigravityHistory"
 import { estimateAgTextTokens, estimateAgTokens } from "./antigravityTokens"
+import { AgStepBudgetError, assertAgStep, fitAgStep, fitsAgStep, type AgStepChange, type AgStepObserver } from "./antigravityStepBudget"
 import { renderAgColdTrim } from "./antigravityColdTrim"
 
 import { AgSchemaCompiler, agSchemaError, agUpstreamSchema } from "./antigravitySchema"
@@ -115,30 +116,51 @@ export class AntigravityRun {
   private get promptSuffix(): string {
     return this.runtime.options.allowNativeBrowser ? "\nFor browser work, invoke_subagent with TypeName browser and Workspace inherit. Its chrome_devtools MCP tools are enabled; ordinary self agents may not have that browser tool catalog." : ""
   }
-  private plan(request: AgRequest): string[] {
+  private plan(request: AgRequest, observe: AgStepObserver): string[] {
     const { historyLimits: limits, promptBytes } = this.runtime
     const native = agNativeTools(this.runtime.options)
     const maxTokens = Math.min(limits.stepTokens, limits.contextTokens - (request.max_tokens ?? 8192) - 32)
-    if (maxTokens < 1) throw new AntigravityError("prompt is too long: output reserve exceeds the estimated context budget")
-    const full = renderAgPrompt(request, native, false, this.runtime.options.inlineToolSchemas) + this.promptSuffix
+    if (maxTokens < 1) throw new AgStepBudgetError(0, "Output reserve exceeds the estimated Antigravity budget; reduce requested output")
+    const limit = { bytes: promptBytes, tokens: maxTokens }
+    const render = (messages: AgMessage[]) => renderAgPrompt({ ...request, messages }, native, false, this.runtime.options.inlineToolSchemas) + this.promptSuffix
+    const full = render(request.messages)
+    if (fitsAgStep(full, limit)) {
+      if (this.restored) this.checkContext(full, request.max_tokens)
+      return [full]
+    }
     if (this.restored) {
-      this.checkContext(full, request.max_tokens)
-      return [assertAgStep(full, promptBytes, maxTokens)]
+      const step = fitAgStep({ messages: request.messages, render, protect: latestTypedRequest(request.messages), limit, observe })?.prompt ?? assertAgStep(full, limit)
+      this.checkContext(step, request.max_tokens)
+      return [step]
     }
-    if ((!promptBytes || Buffer.byteLength(full) <= promptBytes) && estimateAgTextTokens(full) <= maxTokens) return [full]
     if (limits.chunked && !request.output_config?.format &&
-      !this.runtime.options.allowNativeBrowser && !this.runtime.options.allowNativeSubagents &&
-      estimateAgTokens(request, this.runtime.options.inlineToolSchemas).input_tokens + (request.max_tokens ?? 8192) <= limits.contextTokens) {
-      const steps = planAgHistory(request, native, this.promptSuffix, Math.min(promptBytes || limits.stepBytes, limits.stepBytes), limits.maxSteps, maxTokens, this.runtime.options.inlineToolSchemas)
-      if (steps.reduce((sum, step) => sum + estimateAgTextTokens(step) + 32, 0) + (request.max_tokens ?? 8192) <= limits.contextTokens) return steps
+      !this.runtime.options.allowNativeBrowser && !this.runtime.options.allowNativeSubagents) {
+      const changes: AgStepChange[] = []
+      try {
+        const steps = planAgHistory(request, native, this.promptSuffix, limit.bytes, limits.maxSteps, limit.tokens, this.runtime.options.inlineToolSchemas, change => changes.push(change))
+        if (steps.reduce((sum, step) => sum + estimateAgTextTokens(step) + 32, 0) + (request.max_tokens ?? 8192) <= limits.contextTokens) {
+          changes.forEach(observe)
+          return steps
+        }
+      } catch (error) {
+        if (!(error instanceof AgStepBudgetError)) throw error
+      }
     }
-    return [renderAgColdTrim(request, native, this.promptSuffix, { bytes: promptBytes, tokens: maxTokens, estimateTokens: estimateAgTextTokens, inlineToolSchemas: this.runtime.options.inlineToolSchemas })]
+    // Keep the existing cold-window policy when only the context reserve, not
+    // the input step limit, requires dropping old completed turns.
+    const fit = fitsAgStep(full, { bytes: limit.bytes, tokens: limits.stepTokens })
+      ? undefined
+      : fitAgStep({ messages: request.messages, render, protect: latestTypedRequest(request.messages), limit, observe })
+    if (fit) return [fit.prompt]
+    const trimmed = renderAgColdTrim(request, native, this.promptSuffix, { ...limit, estimateTokens: estimateAgTextTokens, inlineToolSchemas: this.runtime.options.inlineToolSchemas })
+    observe({ count: 1, before: Buffer.byteLength(full), after: Buffer.byteLength(trimmed) })
+    return [assertAgStep(trimmed, limit)]
   }
   private contextFits(next: number, output?: number): boolean {
     return Math.max(this.writtenTokens, this.reportedInput) + this.outputTokens + next + 32 + (output ?? 8192) <= this.runtime.historyLimits.contextTokens
   }
   private checkContext(prompt: string, output?: number): void {
-    if (!this.contextFits(estimateAgTextTokens(prompt), output)) throw new AntigravityError("prompt is too long: new input exceeds the estimated Antigravity context budget")
+    if (!this.contextFits(estimateAgTextTokens(prompt), output)) throw new AgStepBudgetError(Buffer.byteLength(prompt), "Antigravity cannot fit this input in the remaining budget; compact the conversation")
   }
   fitsContinuation(request: AgRequest): boolean {
     const delta = { ...request, messages: request.messages.slice(this.history.length) }
@@ -190,7 +212,7 @@ export class AntigravityRun {
   private pauseModelTimer(): void {
     clearTimeout(this.timer)
   }
-  async start(): Promise<void> {
+  async start(observe: AgStepObserver): Promise<void> {
     this.beginTurn()
     try {
       await this.grammars.prepare()
@@ -200,7 +222,7 @@ export class AntigravityRun {
       const tools = [...this.request.tools, ...[parallelAgTool({ ...this.request, tool_choice: { type: "auto" } })].filter(tool => tool !== undefined)]
       this.attachments = new AgAttachments(this.workspace, this.attachmentAbort.signal)
       const messages = await this.attachments.messages(this.request.messages.slice(this.restored?.count ?? 0))
-      this.steps = this.plan({ ...this.request, messages })
+      this.steps = this.plan({ ...this.request, messages }, observe)
       if (this.loadingHistory) await writeFile(join(this.workspace, "history-loading"), "", { mode: 0o600 })
       await writeFile(join(this.workspace, "policy-audit.jsonl"), "", { mode: 0o600 })
       const hookPath = join(this.workspace, "policy.cjs")
@@ -385,7 +407,7 @@ export class AntigravityRun {
       request.messages.slice(this.history.length).every(message => message.role === "user")
   }
   rememberCompleted(): void { this.completedSnapshot = true }
-  async resume(request: AgRequest, signal?: AbortSignal): Promise<void> {
+  async resume(request: AgRequest, observe: AgStepObserver, signal?: AbortSignal): Promise<void> {
     this.completedSnapshot = false
     this.continuation = "live"
     this.busy = true
@@ -403,7 +425,9 @@ export class AntigravityRun {
       this.history = request.messages
       this.terminal = false; this.idle = false; this.outputBytes = 0
       this.steps = []; this.stepIndex = 0
-      const prompt = assertAgStep(renderAgPrompt({ ...request, messages: delta }, agNativeTools(this.runtime.options), false, this.runtime.options.inlineToolSchemas) + this.promptSuffix, this.runtime.promptBytes, this.runtime.historyLimits.stepTokens)
+      const limit = { bytes: this.runtime.promptBytes, tokens: this.runtime.historyLimits.stepTokens }
+      const render = (messages: AgMessage[]) => renderAgPrompt({ ...request, messages }, agNativeTools(this.runtime.options), false, this.runtime.options.inlineToolSchemas) + this.promptSuffix
+      const prompt = fitAgStep({ messages: delta, render, protect: latestTypedRequest(delta), limit, observe })?.prompt ?? assertAgStep(render(delta), limit)
       this.checkContext(prompt, request.max_tokens)
       this.writeInput(prompt)
       this.runtime.reused++
@@ -426,7 +450,7 @@ export class AntigravityRun {
     await new Promise(resolve => setTimeout(resolve, 25))
     return [first, ...this.queue.takeQueuedTools()]
   }
-  async accept(results: AgResult[], clientMessages: AgMessage[] = []): Promise<void> {
+  async accept(results: AgResult[], clientMessages: AgMessage[], observe: AgStepObserver): Promise<"accepted" | "replay"> {
     this.continuation = "tool-result"
     if (results.length !== this.delivered.length || results.some(result => !this.delivered.some(call => call.id === result.tool_use_id))) throw new AntigravityError("Tool results must match the entire delivered batch", 409)
     if (hasAgImages([{ role: "user", content: results }, ...clientMessages]) && !this.runtime.options.allowToolBridge) throw new AntigravityError("Images require explicit MERIDIAN_AGY_ALLOW_TOOL_BRIDGE=1")
@@ -437,7 +461,18 @@ export class AntigravityRun {
     for (const result of results) prepared.push(await this.attachments!.toolResult(result))
     const messages = await this.attachments!.messages(clientMessages)
     if (this.stopped || results.some(result => !this.pending.has(result.tool_use_id))) throw new AntigravityError("Tool result was not requested by this turn", 409)
-    const batch = assertAgStep(JSON.stringify({ results: prepared, messages }), this.runtime.promptBytes, this.runtime.historyLimits.stepTokens)
+    const batchMessages: AgMessage[] = [{ role: "user", content: prepared }, ...messages]
+    const render = ([first, ...followup]: AgMessage[]) => JSON.stringify({ results: first?.content, messages: followup })
+    const limit = { bytes: this.runtime.promptBytes, tokens: this.runtime.historyLimits.stepTokens }
+    const full = render(batchMessages)
+    // agy can spill large MCP replies into internal files outside the deny hook's
+    // allowlist. Replay completed client history before delivering any result.
+    if (!fitsAgStep(full, limit) && !this.runtime.options.allowNativeBrowser && !this.runtime.options.allowNativeSubagents) return "replay"
+    const toolNames = new Map(this.delivered.map(call => [call.id, call.name]))
+    const fit = fitAgStep({ messages: batchMessages, render, protect: latestTypedRequest(batchMessages), limit, observe, toolNames })
+    const batch = fit?.prompt ?? assertAgStep(full, limit)
+    const wire = fit?.messages ?? batchMessages
+    const reduced = wire[0] ? blocks(wire[0]).filter(block => block.type === "tool_result") : []
     this.checkContext(batch, this.request.max_tokens)
     this.writtenTokens += estimateAgTextTokens(batch) + 32
     clearTimeout(this.pendingTimer)
@@ -448,8 +483,9 @@ export class AntigravityRun {
       this.pending.delete(result.tool_use_id)
       this.runtime.rememberConsumedTool(result.tool_use_id)
       this.runtime.toolOwners.delete(result.tool_use_id)
-      pending.resolve({ ...prepared[index]!, clientMessages: index === 0 ? messages : [] })
+      pending.resolve({ ...reduced[index]!, clientMessages: index === 0 ? wire.slice(1) : [] })
     }
+    return "accepted"
   }
   async stopAtSequence(): Promise<void> {
     this.abort(new AntigravityError("Client stop sequence reached", 499, "api_error"), "completed")
@@ -509,7 +545,7 @@ export class AntigravityRun {
 
 export class AntigravityRuntime {
   readonly historyLimits = agHistoryLimits()
-  readonly promptBytes = agPromptByteLimit()
+  readonly promptBytes = Math.min(agPromptByteLimit() || this.historyLimits.stepBytes, this.historyLimits.stepBytes)
   // Exited processes leave admission maps before asynchronous workspace cleanup.
   // Keep joining them before the backend closes the shared state database.
   readonly settling = new Set<Promise<void>>()
@@ -735,11 +771,11 @@ export class AntigravityRuntime {
     })().catch(error => { this.initialization = undefined; throw error })
     return this.initialization
   }
-  async create(request: AgRequest, signal?: AbortSignal): Promise<AntigravityRun> {
+  async create(request: AgRequest, signal?: AbortSignal, observe: AgStepObserver = () => undefined): Promise<AntigravityRun> {
     if (this.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
     if (((request.tools.length && request.tool_choice?.type !== "none") || hasAgImages(request.messages)) && !this.options.allowToolBridge) throw new AntigravityError("Client tools and images require explicit MERIDIAN_AGY_ALLOW_TOOL_BRIDGE=1; see the Antigravity guide")
     const reusable = [...this.runs.values()].find(run => run.matches(request))
-    if (reusable?.fitsContinuation(request)) { await reusable.resume(request, signal); return reusable }
+    if (reusable?.fitsContinuation(request)) { await reusable.resume(request, observe, signal); return reusable }
     const reclaim = reusable ?? (this.runs.size + this.preparing >= this.maxConcurrent
       ? [...this.runs.values()].find(run => run.reclaimable) : undefined
     )
@@ -765,7 +801,7 @@ export class AntigravityRuntime {
       this.runs.set(run.id, run)
       const cancel = () => run.abort(new AntigravityError("Request cancelled", 499, "api_error"))
       signal?.addEventListener("abort", cancel, { once: true })
-      try { await run.start() } finally { signal?.removeEventListener("abort", cancel) }
+      try { await run.start(observe) } finally { signal?.removeEventListener("abort", cancel) }
       return run
     } finally { this.preparing-- }
   }

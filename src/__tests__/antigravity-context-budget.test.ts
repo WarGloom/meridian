@@ -37,10 +37,10 @@ function expectPairs(messages: AgMessage[]) {
   expect(pending.size).toBe(0)
 }
 
-async function fixture(priming?: string, persist = false, inlineToolSchemas = true) {
+async function fixture(priming?: string, persist = false, inlineToolSchemas = true, allowNativeSubagents = false) {
   const directory = await mkdtemp(join(tmpdir(), "agy-context-budget-"))
   const path = join(directory, "steps.jsonl")
-  const runtime = new AntigravityRuntime({ executable, allowToolBridge: true, turnTimeoutMs: 5000, inlineToolSchemas, statePath: persist ? join(directory, "state.sqlite") : undefined })
+  const runtime = new AntigravityRuntime({ executable, allowToolBridge: true, turnTimeoutMs: 5000, inlineToolSchemas, allowNativeSubagents, statePath: persist ? join(directory, "state.sqlite") : undefined })
   runtime.childEnv.AGY_FIXTURE_CONTEXT_LOG = path
   if (priming) runtime.childEnv.AGY_FIXTURE_CONTEXT_PRIMING = priming
   const backend = createAntigravityServer({ ...DEFAULT_PROXY_CONFIG, backend: "antigravity" }, runtime)
@@ -178,18 +178,78 @@ describe("Antigravity context budgeting", () => {
     expect(await steps()).toHaveLength(1)
   })
 
-  it("rejects an oversized client tool result before the CLI can receive it", async () => {
-    const { send } = await fixture()
-    const messages = [text("Run lookup")]
+  it.each([false, true])("fits an over-budget pending batch without losing correlation (native grant: %s)", async native => {
+    const { send, steps, runtime } = await fixture(undefined, false, true, native)
+    const messages = [text("PARALLEL2 Run lookup")]
     const first = await send(messages)
     expect(first.status).toBe(200)
-    const reply = await first.json() as { content: { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }[] }
-    const call = reply.content.find(block => block.type === "tool_use")!
+    const reply = await first.json() as { content: Extract<ReturnType<typeof blocks>[number], { type: "tool_use" }>[] }
+    const calls = reply.content.filter(block => block.type === "tool_use")
+    expect(calls.map(call => call.name)).toEqual(["lookup", "lookup"])
+    const large = "HEAD!" + "😀".repeat(80000) + "!TAIL"
     const result = await send([...messages, { role: "assistant", content: reply.content }, {
-      role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content: "\u6f22".repeat(20000) }],
+      role: "user", content: calls.map((call, index) => ({ type: "tool_result", tool_use_id: call.id, content: index === 0 ? large : "SMALL_RESULT" })),
     }])
+    expect(result.status).toBe(200)
+    const answer = (await result.json() as { content: { text: string }[] }).content.map(block => block.text).join("")
+    const marker = /\n\[Meridian: Tool result "lookup" \(call "([^"\n]+)"\), (\d+) original bytes, (\d+) bytes omitted\.[^\n]+\]\n/.exec(answer)
+    expect(marker?.[1]).toBe(calls[0]?.id)
+    expect(Number(marker?.[2])).toBe(Buffer.byteLength(large))
+    expect(answer.match(/bytes omitted/g)).toHaveLength(1)
+    const [head, tail] = answer.split(marker?.[0] ?? "INVALID_MARKER")
+    expect(head).toMatch(/^HEAD!😀+/u)
+    expect(tail).toMatch(/😀+!TAIL[|]SMALL_RESULT$/u)
+    expect(Number(marker?.[3])).toBe(Buffer.byteLength(large) - Buffer.byteLength((head ?? "") + (tail ?? "").replace(/\|SMALL_RESULT$/, "")))
+    expect(answer.isWellFormed()).toBe(true)
+    expect(await steps()).toHaveLength(native ? 1 : 2)
+    expect(runtime.requests[0]?.continuation).toBe(native ? "tool-result" : "history-replay")
+  })
+
+  it("rejects the newest oversized message but fits it as historical input on the next request", async () => {
+    process.env.MERIDIAN_AGY_CHUNKED_HISTORY = "1"
+    const { send, steps } = await fixture("silent")
+    const first = text("SKIP_TOOLS first")
+    expect((await send([first])).status).toBe(200)
+    const history = [first, assistant("READY")]
+    const rejected = text("HISTORY_HEAD" + "z".repeat(320_000) + "HISTORY_TAIL")
+    const result = await send([...history, rejected])
     expect(result.status).toBe(400)
-    expect(await result.text()).toContain("estimated")
+    expect(await result.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/Shorten.*file.*reference/) } })
+    expect(await steps()).toHaveLength(1)
+    expect((await send([...history, rejected, text("SKIP_TOOLS normal")])).status).toBe(200)
+    const frames = await steps()
+    expect(frames.at(-1)?.prompt).toContain("SKIP_TOOLS normal")
+    const wire = frames.slice(1).map(frame => frame.prompt).join("\n")
+    expect(wire).toMatch(/HISTORY_HEAD[\s\S]*bytes omitted[\s\S]*HISTORY_TAIL/)
+    expect(frames.every(frame => Buffer.byteLength(frame.prompt) <= 180_000)).toBe(true)
+  })
+
+  it("fits oversized historical and newest tool pairs during cold replay without losing their ids", async () => {
+    process.env.MERIDIAN_AGY_CHUNKED_HISTORY = "1"
+    const { send, steps } = await fixture("silent")
+    const payload = "RESULT_HEAD" + "x".repeat(320_000) + "RESULT_TAIL"
+    const result = await send([text("Read both chunks"), ...historicalPairs(2, payload)])
+    expect(result.status).toBe(200)
+    const frames = await steps()
+    expect(frames.every(frame => Buffer.byteLength(frame.prompt) <= 180_000)).toBe(true)
+    const replay = frames.flatMap(frame => unpack(frame.prompt))
+    expectPairs(replay)
+    const results = replay.flatMap(blocks).filter(block => block.type === "tool_result")
+    expect(results.map(block => block.tool_use_id)).toEqual(["tool_0", "tool_1"])
+    for (const result of results) expect(result.content).toMatch(/^RESULT_HEAD[\s\S]*320022 original bytes, \d+ bytes omitted[\s\S]*RESULT_TAIL$/)
+  })
+
+  it("rejects an impossible output reserve and accepts a later request with a smaller reserve", async () => {
+    process.env.MERIDIAN_AGY_MAX_CONTEXT_TOKENS = "3000"
+    const { send, steps } = await fixture()
+    const first = text("SKIP_TOOLS first")
+    expect((await send([first])).status).toBe(200)
+    const history = [first, assistant("READY"), text("SKIP_TOOLS continue")]
+    const response = await send(history, { max_tokens: 3000 })
+    expect(response.status).toBe(400)
+    expect(await resultMessage(response)).toContain("reduce requested output")
+    expect((await send(history)).status).toBe(200)
+    expect(await steps()).toHaveLength(2)
   })
 
   it("applies the step budget before starting a restored CLI process", async () => {

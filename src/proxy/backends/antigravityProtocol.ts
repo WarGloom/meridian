@@ -359,7 +359,7 @@ function promptTooLong(bytes: number, limit: number): AntigravityError {
   return new AntigravityError(`prompt is too long: ${bytes} bytes > ${limit} maximum that Antigravity accepts without silently dropping the end of the conversation`)
 }
 /** The newest user message with typed text: the client's current request. */
-function latestTypedRequest(messages: AgMessage[]): number {
+export function latestTypedRequest(messages: AgMessage[]): number {
   for (let at = messages.length - 1; at >= 0; at--) {
     const { role, content } = messages[at]!
     if (role === "user" && (typeof content === "string" ? content.trim() : content.some(b => b.type === "text" && b.text.trim() && !syntheticSteering.has(b)))) return at

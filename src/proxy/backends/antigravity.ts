@@ -15,7 +15,8 @@ import { buildRuntime } from "../buildRuntime"
 import { hasValidApiKey } from "../auth"
 import { headerSettingsResponse, healthHostname } from "../../headerSettings"
 import { AntigravityRuntime, type AntigravityRun } from "./antigravityRuntime"
-import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, contractKey, historyKey, sameAgExecutionContract, parseAgRequestWithMeta, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
+import { AgStepBudgetError, type AgStepObserver } from "./antigravityStepBudget"
+import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, latestTypedRequest, contractKey, historyKey, sameAgExecutionContract, parseAgRequestWithMeta, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
 
 function droppedToolHeaders(names: string[]): Record<string, string> {
   if (!names.length) return {}
@@ -26,7 +27,7 @@ function droppedToolHeaders(names: string[]): Record<string, string> {
 
 function errorResponse(error: unknown): Response {
   const e = error instanceof AntigravityError ? error : new AntigravityError(error instanceof Error ? error.message : String(error), 503, "api_error")
-  return Response.json({ type: "error", error: { type: e.type, message: e.message } }, { status: e.status, headers: e.retryAfter ? { "retry-after": String(e.retryAfter) } : {} })
+  return Response.json({ type: "error", error: { type: e.type, message: e.message } }, { status: e.status, headers: { ...(e.retryAfter ? { "retry-after": String(e.retryAfter) } : {}), ...(e instanceof AgStepBudgetError ? { "x-should-retry": "false" } : {}) } })
 }
 async function readBody(request: Request): Promise<unknown> {
   if (!request.body) throw new AntigravityError("Missing request body")
@@ -51,7 +52,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
   const responses = new AgResponseStore(undefined, undefined, runtime.state)
   const completedAnswers = new AgCompletedAnswers(runtime.state)
   const responseJobs = new AgResponseJobs(responses)
-  async function recoverResults(body: AgRequest, signal: AbortSignal, results: AgResult[], previous?: AntigravityRun, reason: "client-context-replay" | "history-replay" = "client-context-replay"): Promise<AntigravityRun> {
+  async function recoverResults(body: AgRequest, signal: AbortSignal, results: AgResult[], observe: AgStepObserver, previous?: AntigravityRun, reason: "client-context-replay" | "history-replay" = "client-context-replay"): Promise<AntigravityRun> {
     // Claim before retiring the old owner: simultaneous HTTP retries must not
     // start competing replays while shutdown or account preflight is pending.
     const claimed = new Set([...results.map(result => result.tool_use_id), ...(previous?.delivered.map(call => call.id) ?? [])])
@@ -63,7 +64,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         await previous.settled
       }
       if (signal.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
-      const run = await runtime.create(body, signal)
+      const run = await runtime.create(body, signal, observe)
       if (previous) run.continuation = reason
       runtime.forgetInterruptedContinuation(body)
       for (const result of results) runtime.rememberConsumedTool(result.tool_use_id)
@@ -73,7 +74,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       for (const id of claimed) runtime.recoveringTools.delete(id)
     }
   }
-  async function selectRun(body: AgRequest, signal: AbortSignal): Promise<AntigravityRun> {
+  async function selectRun(body: AgRequest, signal: AbortSignal, observe: AgStepObserver): Promise<AntigravityRun> {
     await runtime.waitForInterruptedContinuation(body)
     // Clients may append steering as text in the result message or as another
     // user message. Match the delivered assistant prefix before accepting either.
@@ -94,13 +95,13 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         if (owners.some(owner => owner !== run) || !sameAgExecutionContract(run.request, body) || runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents) {
           throw new AntigravityError("Pending Antigravity tool continuation changed its delivered history or tool batch", 409)
         }
-        return recoverResults(body, signal, continuationResults, run, "history-replay")
+        return recoverResults(body, signal, continuationResults, observe, run, "history-replay")
       }
       if (run.contract !== contractKey(body)) {
         if (!sameAgExecutionContract(run.request, body)) throw new AntigravityError("Pending Antigravity tool continuation changed its model, session or execution controls", 409)
         // A fresh official process installs the new MCP catalog and deny hook.
         // The old pending call never receives a result under a changed context.
-        return recoverResults(body, signal, continuationResults, run)
+        return recoverResults(body, signal, continuationResults, observe, run)
       }
       const followup = suffix.map(message => ({ ...message, content: blocks(message).filter(b => b.type === "text" || b.type === "image" || b.type === "document" || b.type === "audio" || b.type === "video") })).filter(message => message.content.length > 0)
       if (JSON.stringify(run.request.tool_choice) !== JSON.stringify(body.tool_choice)) {
@@ -109,7 +110,11 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       run.request.tool_choice = body.tool_choice
       run.busy = true
       run.history = body.messages
-      try { await run.accept(results, followup) }
+      try {
+        if (await run.accept(results, followup, observe) === "replay") {
+          return recoverResults(body, signal, continuationResults, observe, run, "history-replay")
+        }
+      }
       catch (error) {
         run.busy = false
         run.abort(error instanceof Error ? error : new Error(String(error)))
@@ -117,7 +122,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       }
       return run
     }
-    return recoverResults(body, signal, continuationResults)
+    return recoverResults(body, signal, continuationResults, observe)
   }
 
   async function messages(request: Request, saveCompletedAnswers = true): Promise<Response> {
@@ -151,7 +156,29 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
     if (replayOnly) throw new AntigravityError("No saved response is available for this request", 404, "not_found_error")
     const release = completedAnswers.claim(body, scope, requestId)
     let run: AntigravityRun
-    try { run = await selectRun(body, request.signal) } catch (error) { release(); throw error }
+    let reduced = 0, beforeBytes = 0, afterBytes = 0, rejected = 0
+    const observe: AgStepObserver = change => {
+      reduced += change.count
+      beforeBytes += change.before
+      afterBytes += change.after
+    }
+    try {
+      const newest = latestTypedRequest(body.messages)
+      if (newest > body.messages.findLastIndex(message => message.role === "assistant")) {
+        const message = body.messages[newest]
+        if (message) {
+          const bytes = blocks(message).reduce((total, block) => total + (block.type === "text" ? Buffer.byteLength(block.text) : 0), 0)
+          if (bytes > runtime.promptBytes) throw new AgStepBudgetError(bytes, "Antigravity user message is " + bytes + " bytes; the limit is " + runtime.promptBytes + " bytes")
+        }
+      }
+      run = await selectRun(body, request.signal, observe)
+    } catch (error) {
+      if (error instanceof AgStepBudgetError) { rejected = 1; beforeBytes += error.bytes }
+      release()
+      throw error
+    } finally {
+      if (reduced || rejected) console.warn("[antigravity] Input budget", JSON.stringify({ reduced, rejected, beforeBytes, afterBytes }))
+    }
     let completed = false, cancelledDuringResponse = false
     const cancel = () => { if (!completed) { cancelledDuringResponse = true; run.abort(new AntigravityError("Request cancelled", 499, "api_error")) } }
     request.signal.addEventListener("abort", cancel, { once: true })

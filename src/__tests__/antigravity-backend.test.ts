@@ -462,7 +462,8 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
     const { send } = fixture()
     const response = await send({ ...initial("a".repeat(200000)), tools: [] })
     expect(response.status).toBe(400)
-    expect(JSON.stringify(await response.json())).toMatch(/prompt is too long/)
+    expect(response.headers.get("x-should-retry")).toBe("false")
+    expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/Shorten.*file.*reference/) } })
   })
   it("shrinks an old tool result of a replayed history to fit agy's input limit and keeps the newest result intact", async () => {
     const { send } = fixture()

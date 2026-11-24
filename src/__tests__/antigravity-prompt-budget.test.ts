@@ -49,7 +49,7 @@ describe("Antigravity prompt byte limit", () => {
     const request = parseAgRequest({ model: "fixture-model", system: "s".repeat(151_000), messages: [{ role: "user", content: "run" }], tools: [{ name: "lookup", input_schema: { type: "object", properties: { value: { type: "string", description: "d".repeat(76_000) } } } }] })
     const budget = { bytes: AG_MAX_PROMPT_BYTES, tokens: 52_000, estimateTokens: estimateAgTextTokens }
     expect(Buffer.byteLength(renderAgPrompt(request))).toBeGreaterThan(AG_MAX_PROMPT_BYTES)
-    expect(() => renderAgColdTrim(request, [], "", budget)).toThrow("prompt is too long")
+    expect(tooLong(() => renderAgColdTrim(request, [], "", budget))).toMatchObject({ status: 400, type: "invalid_request_error", message: expect.stringMatching(/Shorten.*file.*reference/) })
     const compact = renderAgColdTrim(request, [], "", { ...budget, inlineToolSchemas: false })
     expect(Buffer.byteLength(compact)).toBeLessThanOrEqual(AG_MAX_PROMPT_BYTES)
     expect(planAgHistory(request, [], "", AG_MAX_PROMPT_BYTES, 12, 52_000, false)).toEqual([compact])

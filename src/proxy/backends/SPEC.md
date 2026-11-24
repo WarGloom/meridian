@@ -93,6 +93,20 @@ inputs, observed output and reported input usage. Reused processes take only
 new messages or results. When a new user continuation would exceed the budget,
 retire the cached process and start a bounded fresh replay. Do not partially
 resolve an oversized client tool batch.
+The 180,000-byte default applies to cold replay, warm input and live tool
+results. An oversized newest typed instruction fails with a non-retryable 400
+before changing the conversation. If a later request includes it in history,
+keep its head and tail and mark the omitted bytes. Reduce tool result text
+largest-first, only until the frame fits. The marker includes the tool name,
+call ID, original UTF-8 bytes and omitted UTF-8 bytes. Retain result IDs,
+pairing, and non-text blocks; do not change the client history used for replay
+identity. For an over-budget live batch without native tool grants, close the
+pending process before delivering results and replay the completed batch in a
+bounded stdin step. This avoids agy's inaccessible internal MCP result file.
+When native tools are granted, reduce the batch in place instead of replaying
+potential side effects. Emit one count-and-byte summary per request that reduces or rejects
+input, never the payload.
+
 
 Cold replay defaults to one bounded input. It retains the latest user request
 and intact retained tool pairs, using middle omission and, when necessary,

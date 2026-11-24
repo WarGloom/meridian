@@ -6,6 +6,8 @@ import {
   type AgRequest,
 } from "./antigravityProtocol"
 
+import { AgStepBudgetError } from "./antigravityStepBudget"
+
 type PromptBudget = { bytes: number; tokens: number; estimateTokens: (prompt: string) => number; inlineToolSchemas?: boolean }
 
 /** A boundary is safe only after every tool in the current batch was answered. */
@@ -78,5 +80,5 @@ export function renderAgColdTrim(
   const start = boundaries.at(-1)!
   const prompt = start ? compact(at(start), prefix) : undefined
   if (prompt) return prompt
-  throw new AntigravityError("prompt is too long: newest complete turn exceeds the estimated input token budget")
+  throw new AgStepBudgetError(Buffer.byteLength(full), "Antigravity cannot fit the newest complete turn in its input budget; compact older context if needed")
 }
