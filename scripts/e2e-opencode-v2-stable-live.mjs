@@ -11,7 +11,7 @@ import { clientAnswer, requireAnswer, requireLiveAdmission, requireSuccessfulTur
 import { verifyPriorityAttestation } from '../src/proxy/priorityAttestation.ts'
 
 const expectedClientVersion = process.env.E2E_OPENCODE_VERSION ?? '2.0.16'
-assert(['2.0.16','2.0.21','2.0.31','2.2.0'].includes(expectedClientVersion), 'Pin a qualified stable host')
+assert(['2.0.16','2.0.21','2.0.31','2.2.0','2.4.1'].includes(expectedClientVersion), 'Pin a stable host under qualification')
 const client = process.env.E2E_OPENCODE_BIN
 assert(client, 'Set E2E_OPENCODE_BIN to the exact stable OpenCode executable')
 const repo = resolve(process.env.E2E_MERIDIAN_ROOT ?? '.')
@@ -192,6 +192,9 @@ try {
   const plugin = join(repo, 'dist', 'meridian-v2')
   writeFileSync(join(config, 'opencode.json'), JSON.stringify({
     $schema: 'https://opencode.ai/config.json',
+    ...(expectedClientVersion === '2.4.1' ? { permissions: [
+      { action: 'execute', resource: '*', effect: 'deny' },
+    ] } : {}),
     model: `anthropic/${model}`,
     providers: { anthropic: { settings: { apiKey: 'local-e2e', baseURL: `${relayURL}/v1` },
       models: { [model]: { limit: { output: 4096 } } } } },

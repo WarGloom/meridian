@@ -85,6 +85,14 @@ unpinned priority failback or another platform. Owner acceptance separately
 covers normal Desktop use with Opus 5.5. Retain earlier failed attempts and
 the exact admitted controller/results in the evidence record.
 
+OpenCode 2.4.1 has provisional admission for the exact version. The maintained
+stable-host fixture passed on Linux x64 with the built V2 plugin: one active
+plugin, catalog adoption, signed primary headers, effort variants, a real local
+file read with its tool result, and resumed, forked and compacted sessions.
+The fixture denies the `execute` permission so the host advertises the direct
+read tool instead of placing it behind Code Mode. This is not a live provider
+qualification. Keep the real subscription and pool gate open until verified.
+
 ## Known limitations
 
 - With no catalog discovered from the configured URL, the built-in catalog

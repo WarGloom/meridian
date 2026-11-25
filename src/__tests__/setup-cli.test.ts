@@ -88,8 +88,8 @@ describe("meridian setup CLI", () => {
     expect(config.plugin[0]).toEndWith(join("plugin", "meridian"))
   })
 
-  test("upgrades the Desktop 2.2.0 configuration to exactly one V2 plugin", () => {
-    const binary = writeVersionCommand(root, "opencode v2.2.0")
+  test.each(["2.2.0", "2.4.1"])("upgrades OpenCode %s configuration to exactly one V2 plugin", (version) => {
+    const binary = writeVersionCommand(root, "opencode v" + version)
     const original = {
       model: "openai/keep-model",
       providers: { openai: { settings: { timeout: 1234 } } },
@@ -109,14 +109,14 @@ describe("meridian setup CLI", () => {
     }
   })
 
-  test("still rejects an unqualified 2.2 patch without touching config", () => {
-    const binary = writeVersionCommand(root, "opencode v2.2.1")
+  test.each(["2.2.1", "2.4.0", "2.4.2"])("rejects unqualified OpenCode %s without touching config", (version) => {
+    const binary = writeVersionCommand(root, "opencode v" + version)
     const original = '{"plugins":["keep-me"]}\n'
     writeFileSync(configPath, original)
 
     const result = runSetup(["--v2", "--opencode-bin", binary])
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain("2.2.1 is not supported")
+    expect(result.stderr).toContain(version + " is not supported")
     expect(readFileSync(configPath, "utf8")).toBe(original)
   })
 
