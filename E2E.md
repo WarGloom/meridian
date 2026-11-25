@@ -253,9 +253,8 @@ independently installed package's exported function for the package arm.
 Run `node scripts/e2e-antigravity-idle-conversation.mjs <server.js> <pi-integration.js> <pi-cli.js> <official-agy> <new-report.json> <label>`
 against unchanged main and candidate builds. The gate pins the verified official
 agy1.2.7 macOS ARM64 binary hash and uses actual Pi1.1.0/Gemini3.8FlashLow.
-That pin predates the 1.5.x compatibility gates: until this gate is re-verified
-on macOS with agy 1.5.13 (new binary hash), it cannot run against a current
-build, which refuses 1.2.7.
+That pin predates the current TSV account configuration contract. Re-verify
+this gate on macOS with a CLI that implements that contract and record its hash.
 It validates the real provider-specific Pi retry integration against a local
 fixture before allowing generation, and retains its request-ID check at native
 admission. The independently installed arm uses the packaged
@@ -970,6 +969,13 @@ Model discovery and quota parsing passed. Two HTTP Messages requests to
 supplied in its correlated tool result. This was a direct HTTP bridge check,
 not a Pi or OpenCode client run.
 
+**Verified 2026-11-25 (agy 1.5.17 gate move, Linux x64):** Input-free checks passed for CLI flags,
+account settings, model discovery, quota parsing, and custom-agent init on both fresh
+and restored conversations. The binary hash stayed unchanged, and both sessions
+reported zero turns. OpenCode 2.4.1 sent one request to the Antigravity provider
+in an isolated combined Meridian candidate. The exact `gemini-4-argon-medium`
+process returned the receipt from the candidate's custom agent file.
+
 The extended native gate runs the actual macOS app with disposable app data and
 an app-managed combined service:
 
@@ -1192,8 +1198,8 @@ bun scripts/e2e-antigravity-active-history.mjs
 
 Use Bun 1.4.3, Pi 1.1.0 and the official agy 1.2.7 Darwin arm64 binary.
 This gate is frozen to agy 1.2.7 (version and binary-hash asserts); like the
-idle-conversation gate it needs a macOS 1.5.13 refresh before it can run
-against a current build, which refuses 1.2.7.
+idle-conversation gate it needs a macOS refresh with a CLI that implements the
+current TSV account configuration contract.
 The gate requires the default subscription with paid credits/custom providers disabled,
 imports the retained public long-history fixture, and requires one exact write
 and a correlated read after joined backend replacement. The newest request,
@@ -8570,8 +8576,8 @@ do not claim the CLI's underlying intermittent stall is fixed.
 Fourteen direct probe tests cover successful timeout retry after join, forced
 termination of an uncooperative process, exhaustion, output bounds/privacy,
 cancellation and shutdown, missing executables, concurrent check sharing and
-fresh later checks, and immediate refusal of unsupported versions, malformed
-configuration, custom providers and paid overage. The first cancellation test
+fresh later checks, and immediate refusal of malformed configuration, custom
+providers and paid overage. The first cancellation test
 failed because its fixed delay could expire before fixture startup; the final
 test waits for the fixture's explicit start marker before cancelling.
 

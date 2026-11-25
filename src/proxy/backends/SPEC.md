@@ -182,10 +182,13 @@ independent of the allowance.
 - **Platform verification.** Authenticated acceptance exists on macOS arm64
   (agy 1.2.7, Pi 0.72.1, OpenCode V1 1.18.31) and, for the core, Pi-client and
   account-settings gates, on Linux x64 (agy 1.5.5, Pi 1.5.2, 2026-11-12; agy
-  1.5.13, Pi 1.3.0, 2026-11-22). The compatibility gate accepts agy 1.5.13,
-  1.5.15, and 1.5.16. The frozen macOS gates still pin the 1.2.7 binary hash
-  and await a 1.5.13 re-run on that platform. Windows remains
-  unverified.
+  1.5.13, Pi 1.3.0, 2026-11-22). Linux live evidence also covers agy 1.5.17
+  with OpenCode 2.4.1. Runtime admission checks the account configuration
+  and model catalog; launch and stream errors remain fatal. The CLI version
+  is diagnostic. The TSV configuration requires one empty row each for
+  `customModelsConfig`, `modelProvider`, and `gcp`, and one `useG1Credits` row
+  with the exact value `false`. The frozen macOS gates still pin the 1.2.7 binary hash and
+  need fresh evidence for the current protocol. Windows remains unverified.
 - **Active-task reattachment** after a restart and **automatic reconciliation of
   uncertain tool outcomes** are unfinished; an unclean restart returns 409 with
   recovery guidance instead.

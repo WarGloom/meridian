@@ -74,10 +74,9 @@ When running from a checkout, replace `meridian` with `node dist/cli.js` after
 
 ## Read-only CLI timeout recovery
 
-Before generation, Meridian verifies the official CLI version and its current
-subscription configuration. Simultaneous checks in one runtime share the same
-in-flight check; later requests validate again. Version validation precedes the
-configuration command.
+Before generation, Meridian records the official CLI version for diagnostics
+and verifies the current subscription configuration. Simultaneous checks in
+one runtime share the same in-flight check; later requests validate again.
 
 Both `/config` and `agy models` discovery probes have a 20-second deadline. If either times out, Meridian terminates
 and joins it (forcing termination after one second if needed), waits 250 ms, and
@@ -85,11 +84,11 @@ retries that read-only command once. Generation still requires a successful,
 validated configuration response. Both attempts timing out returns an explicit
 failure; no model request is sent by that admission. Command exits, missing
 executables, oversized output, malformed configuration, disallowed providers,
-paid overage and unsupported versions are not retried. Shutdown cancels active
+and paid overage are not retried. Shutdown cancels active
 probes and prevents retry. Failed version/configuration/model probes also impose
 a five-second account-check cooldown with HTTP 503 and `Retry-After`; no old
-successful authorization is reused. Configuration refusals and unsupported
-versions still require operator correction.
+successful authorization is reused. Invalid or unsafe configuration still
+requires operator correction.
 
 Diagnostics report reason, attempt, elapsed time, deadline, exit/signal and output
 size without exposing CLI configuration contents. A recovered timeout is logged.
@@ -327,11 +326,15 @@ app does not collect Google credentials or repurpose Claude profile login.
 
 ## Compatibility and operational contract
 
-The text/client-tools gate accepts official `agy` **1.5.13**, **1.5.15**, and **1.5.16**.
-The macOS 1.2.7 acceptance below predates these gate moves and awaits a 1.5.13
-re-run on that platform.
-An unverified CLI update is refused before a new model process starts. Validate
-new versions with the live gates below before changing the compatibility gate.
+The version string does not grant or deny admission. Meridian requires the
+current configuration and model catalog formats, and rejects CLI launch
+failures or incompatible stream output. These checks do not qualify future
+releases; use the live gates below to verify observed behavior and tool policy.
+The TSV configuration must contain exactly one row for each safety setting.
+The values for `customModelsConfig`, `modelProvider`, and `gcp` must be empty.
+The value for `useG1Credits` must be exactly `false`.
+Linux live evidence includes agy **1.5.17**. The older macOS 1.2.7 acceptance
+predates the current account configuration contract.
 `/health` still reports Linux as `preview` and macOS as `supported` until each
 platform has full 1.5.13 client evidence. Windows
 process-tree termination and hook quoting are implemented and exercised in CI;

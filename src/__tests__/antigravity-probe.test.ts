@@ -37,7 +37,7 @@ function fixture(mode = 'once', settings?: Record<string, unknown>) {
 const root = process.env.AG_PROBE_ROOT, mode = process.env.AG_PROBE_MODE;
 const log = path.join(root, 'calls');
 fs.appendFileSync(log, JSON.stringify({args:process.argv.slice(2),pid:process.pid})+'\\n');
-if(process.argv[2] === '--version') { console.log(mode === 'version' ? 'unsupported' : '1.5.13'); }
+if(process.argv[2] === '--version') { console.log('1.5.13'); }
 else {
  const counter=path.join(root,'count'); const count=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;
  fs.writeFileSync(counter,String(count+1));
@@ -52,9 +52,9 @@ else {
      const old=Number(fs.readFileSync(path.join(root,'old-pid'),'utf8'));
      try {process.kill(old,0);process.exit(43);} catch(e) {if(e.code !== 'ESRCH') throw e;}
    }
-   const settings=process.env.AG_PROBE_SETTINGS ? JSON.parse(process.env.AG_PROBE_SETTINGS) : {customModelsConfig:{},modelProvider:mode === 'provider' ? 'api' : '',useG1Credits:mode === 'paid'};
+   const settings=process.env.AG_PROBE_SETTINGS ? JSON.parse(process.env.AG_PROBE_SETTINGS) : {customModelsConfig:{},modelProvider:mode === 'provider' || mode === 'duplicate-provider' ? 'api' : '',gcp:'',useG1Credits:mode === 'paid'};
    const tsv=Object.entries(settings).map(([k,v])=>k+'\\t'+(v===null||v===undefined?'':typeof v==='object'?(Object.keys(v).length?JSON.stringify(v):''):String(v))).join('\\n');
-   console.log(process.argv[2] === 'models' ? 'gemini-test\\tGemini Test' : mode === 'malformed' ? 'not-json' : JSON.stringify({conversation_id:'',status:'SUCCESS',response:tsv}));
+   console.log(process.argv[2] === 'models' ? 'gemini-test\\tGemini Test' : mode === 'malformed' ? 'not-json' : JSON.stringify({conversation_id:'',status:'SUCCESS',response:tsv+(mode === 'duplicate-provider' ? "\\nmodelProvider\\t" : '')}));
  }
 }
 `, { mode: 0o755 })
@@ -216,7 +216,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity read-only subscriptio
     } finally { await runtime.close() }
   })
   it('accepts explicit false credits in default settings and rechecks account authorization', async () => {
-    const f = fixture('success', { customModelsConfig: {}, modelProvider: '', useG1Credits: false })
+    const f = fixture('success', { customModelsConfig: {}, modelProvider: '', gcp: '', useG1Credits: false })
     const runtime = new AntigravityRuntime({ executable: f.executable })
     Object.assign(runtime.childEnv, f.env)
     try {
@@ -239,9 +239,27 @@ describe.skipIf(process.platform === 'win32')('Antigravity read-only subscriptio
       expect(runtime.runs.size).toBe(0)
     } finally { await runtime.close() }
   })
+  for (const missing of ['customModelsConfig', 'modelProvider', 'gcp', 'useG1Credits']) it('rejects a missing ' + missing + ' row before generation admission', async () => {
+    const settings = { customModelsConfig: '', modelProvider: '', gcp: '', useG1Credits: false }
+    const f = fixture('success', Object.fromEntries(Object.entries(settings).filter(([key]) => key !== missing)))
+    const runtime = new AntigravityRuntime({ executable: f.executable })
+    Object.assign(runtime.childEnv, f.env)
+    try {
+      await expect(runtime.create(parseAgRequest({ model: 'gemini-test', messages: [{ role: 'user', content: 'Fixture admission check' }] })))
+        .rejects.toThrow('missing ' + missing)
+      expect(runtime.runs.size).toBe(0)
+    } finally { await runtime.close() }
+  })
+  it('rejects duplicate modelProvider rows even when the last row is empty', async () => {
+    const f = fixture('duplicate-provider'), runtime = new AntigravityRuntime({ executable: f.executable })
+    Object.assign(runtime.childEnv, f.env)
+    try {
+      await expect(runtime.verifyAccount()).rejects.toThrow('duplicate modelProvider')
+    } finally { await runtime.close() }
+  })
   const invalidCredits = [
-    { label: 'absent', settings: { customModelsConfig: {}, modelProvider: '' } },
-    ...[null, 0, ''].map(useG1Credits => ({ label: JSON.stringify(useG1Credits), settings: { customModelsConfig: {}, modelProvider: '', useG1Credits } })),
+    { label: 'absent', settings: { customModelsConfig: {}, modelProvider: '', gcp: '' } },
+    ...[null, 0, ''].map(useG1Credits => ({ label: JSON.stringify(useG1Credits), settings: { customModelsConfig: {}, modelProvider: '', gcp: '', useG1Credits } })),
   ]
   for (const { label, settings } of invalidCredits) {
     for (const operation of ['account validation', 'model discovery', 'generation admission']) {
@@ -266,7 +284,7 @@ describe.skipIf(process.platform === 'win32')('Antigravity read-only subscriptio
       try {
         await expect(runtime.verifyAccount()).rejects.toThrow()
         expect(f.calls().map(call => call.args[0])).toEqual(['--version', '-p'])
-        runtime.childEnv.AG_PROBE_SETTINGS = JSON.stringify({ customModelsConfig: {}, modelProvider: '', useG1Credits: false })
+        runtime.childEnv.AG_PROBE_SETTINGS = JSON.stringify({ customModelsConfig: {}, modelProvider: '', gcp: '', useG1Credits: false })
         await runtime.verifyAccount()
         expect(f.calls().map(call => call.args[0])).toEqual(['--version', '-p', '--version', '-p'])
         expect(await runtime.availableModels()).toEqual(['gemini-test'])
@@ -276,12 +294,12 @@ describe.skipIf(process.platform === 'win32')('Antigravity read-only subscriptio
       } finally { await runtime.close() }
     })
   }
-  for (const mode of ['version', 'provider', 'paid', 'malformed']) it(`does not retry invalid ${mode} validation`, async () => {
+  for (const mode of ['provider', 'paid', 'malformed']) it(`does not retry invalid ${mode} validation`, async () => {
     const f = fixture(mode), runtime = new AntigravityRuntime({ executable: f.executable })
     Object.assign(runtime.childEnv, f.env)
     try {
-      await expect(runtime.verifyAccount()).rejects.toThrow()
-      expect(f.calls().filter(call => call.args[1] === '/config')).toHaveLength(mode === 'version' ? 0 : 1)
+      await expect(runtime.verifyAccount()).rejects.toThrow(mode === 'malformed' ? 'Expected JSON from agy -p /config' : 'paid overage credits disabled')
+      expect(f.calls().filter(call => call.args[1] === '/config')).toHaveLength(1)
       expect(runtime.runs.size).toBe(0)
     } finally { await runtime.close() }
   })

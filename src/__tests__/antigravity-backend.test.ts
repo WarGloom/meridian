@@ -419,9 +419,12 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
     await Promise.all([...runtime.runs.values()].map(run => run.settled))
     expect(runtime.runs.size).toBe(0)
   })
-  it("rejects malformed CLI output instead of emitting success", async () => {
-    const { send } = fixture()
-    expect((await send({ ...initial("MALFORMED"), tools: [] })).status).toBe(502)
+  it("rejects malformed CLI output from a newer version instead of emitting success", async () => {
+    const { send, runtime } = fixture()
+    runtime.childEnv.AGY_FIXTURE_VERSION = "9.0.0"
+    const response = await send({ ...initial("MALFORMED"), tools: [] })
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining("Invalid Antigravity stream") } })
   })
   it("requires the explicit tool-bridge opt-in", async () => {
     const { send, runtime } = fixture({ allowToolBridge: false })
@@ -488,16 +491,16 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
       else process.env.MERIDIAN_API_KEY = previous
     }
   })
-  it("refuses unverified CLI upgrades and changed provider settings before a fresh process", async () => {
+  for (const version of ["1.5.17", "9.0.0"]) it("accepts agy " + version + " with a compatible protocol but rejects changed provider settings", async () => {
     const { send, runtime } = fixture()
-    expect((await send({ ...initial(), tools: [] })).status).toBe(200)
-    runtime.childEnv.AGY_FIXTURE_API = "1"
-    expect((await send({ ...initial(), tools: [] })).status).toBe(503)
-    delete runtime.childEnv.AGY_FIXTURE_API
-    runtime.childEnv.AGY_FIXTURE_VERSION = "2.0.0"
+    runtime.childEnv.AGY_FIXTURE_VERSION = version
     const response = await send({ ...initial(), tools: [] })
-    expect(response.status).toBe(503)
-    expect(await response.text()).toContain("Unsupported agy version")
+    expect(response.status).toBe(200)
+    expect((await decode(response)).content).toEqual([{ type: "text", text: "READY" }])
+    runtime.childEnv.AGY_FIXTURE_API = "1"
+    const unsafe = await send({ ...initial(), tools: [] })
+    expect(unsafe.status).toBe(503)
+    expect(await unsafe.json()).toMatchObject({ error: { message: expect.stringContaining("paid overage credits disabled") } })
   })
   it("classifies quota refusals consistently for JSON and SSE", async () => {
     const { send } = fixture()
