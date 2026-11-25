@@ -72,9 +72,10 @@ contract ([`api-contract`](.agents/references/api-contract.md)).
 
 ## Principles
 
-- **Providers stay isolated.** Claude account routing, sessions and caches never
-  leak into Antigravity or ChatGPT paths, and vice versa; account identities and
-  quotas are reported separately.
+- **Providers stay isolated.** Combined mode can opt one agy account into
+  Claude priority routing for exact supported Claude models. The shared pool
+  selects an owner; credentials, sessions, caches and quota accounting stay
+  separate. ChatGPT does not participate in that pool.
 - **Client-specific behavior lives in adapters**, not spread through the core.
 - **Risky or costly behavior is opt-in.** Automatic account switching, native
   browser/subagent grants, the ChatGPT backend, update checks and crash

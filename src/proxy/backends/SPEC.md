@@ -53,6 +53,24 @@ provider service*; public routes and headers are in
 [`api-contract`](../../../.agents/references/api-contract.md); feature status in
 `docs/antigravity-support.md`.
 
+### Participation in the Claude priority pool
+
+The combined listener uses a private attempt API on the same backend instance.
+It verifies the signed-in account and exact catalog slug before generation.
+Native grants make the candidate ineligible. Existing agy client-tool grants
+and durable state are required for pooled tool work. An internal namespace
+separates its sessions and recovery scope from mounted Antigravity routes.
+
+Effort selects the Google-hosted Claude slug only. It never supplies the CLI
+effort flag. Absent effort selects the listed high variant as Meridian policy.
+The client response keeps the requested Claude ID. The attempt commits before
+any real output and joins failed runs before the dispatcher considers failover.
+The existing completed-answer budget also saves first tool batches without a
+client request ID. Exact paired history can recover the saved owner after a
+restart; it cannot re-execute the tool. Missing proof fails closed.
+The consumed-result guard also covers results followed by a separate user
+message in the same continuation. Changing that message cannot replay the batch.
+
 ## Completed-history recovery
 
 This deliberately relaxes #1074's rule that a changed delivered history/batch
@@ -95,10 +113,10 @@ retire the cached process and start a bounded fresh replay. Do not partially
 resolve an oversized client tool batch.
 The 180,000-byte default applies to cold replay, warm input and live tool
 results. An oversized newest typed instruction fails with a non-retryable 400
-before changing the conversation. If a later request includes it in history,
-keep its head and tail and mark the omitted bytes. Reduce tool result text
-largest-first, only until the frame fits. The marker includes the tool name,
-call ID, original UTF-8 bytes and omitted UTF-8 bytes. Retain result IDs,
+before changing the conversation. If that message needs reduction as part of
+a later request's history, keep its head and tail and mark the omitted bytes.
+Reduce tool result text largest-first, only until the frame fits. The marker
+includes the tool name, call ID, original UTF-8 bytes and omitted UTF-8 bytes. Retain result IDs,
 pairing, and non-text blocks; do not change the client history used for replay
 identity. For an over-budget live batch without native tool grants, close the
 pending process before delivering results and replay the completed batch in a
@@ -107,17 +125,32 @@ When native tools are granted, reduce the batch in place instead of replaying
 potential side effects. Emit one count-and-byte summary per request that reduces or rejects
 input, never the payload.
 
+Each CLI process receives non-empty top-level client system text once, as a
+workspace custom agent: `.agents/agents/meridian-<sha256 prefix>.md`. Meridian
+writes the file atomically before spawn and selects it with `--agent` and
+`--add-dir`. The CLI must confirm the agent in its init event before Meridian
+sends any input. Cold and warm input steps keep the conversation and bridge
+instructions but do not repeat the client system text. The estimated context
+budget still counts the system text. The execution contract binds that text:
+a change starts a fresh process, while an exact native restore recreates the
+same agent in its claimed workspace. Agent files follow the workspace cleanup
+and retention rules and are not on the file-read allowlist. Non-empty system
+text over 600,000 UTF-8 bytes returns a non-retryable 400. This is Meridian's
+bound, not a measured CLI limit. Requests without system text render as before.
 
-Cold replay defaults to one bounded input. It retains the latest user request
-and intact retained tool pairs, using middle omission and, when necessary,
-dropping older completed units. The operator can opt into multi-step history
-loading. This experimental path submits complete historical units, denies
-actions during priming, requires a new indexed input marker for each step and
-does not expose priming text or usage as the final answer. Structured output
-and native capability grants use the single-input policy. Priming failures do
-not retry automatically; a normally completed priming step need not emit a
-visible acknowledgement. When the newest unit is a tool batch, its final
-input also carries the latest typed user goal in its own complete unit.
+Cold replay uses one input when it fits. On overflow, a request with a workspace
+agent tries bounded multi-step replay before single-step trimming. If the
+replay plan exceeds the step count cap, use single-step trimming instead. Set
+`MERIDIAN_AGY_CHUNKED_HISTORY=1` to enable the same path without an agent.
+Structured output and native capability grants still use the single-input
+policy. Single-step trimming retains the latest user request and intact tool
+pairs, using middle omission or dropping older completed units when necessary.
+Multi-step replay sends complete historical units, denies actions during
+priming, and requires a new indexed input marker for each step. It does not
+expose priming text or usage as the final answer. Priming failures do not retry
+automatically; a completed priming step need not emit a visible acknowledgement.
+When the newest unit is a tool batch, the final input also carries the latest
+typed user goal in its own complete unit.
 
 ## Request normalization
 

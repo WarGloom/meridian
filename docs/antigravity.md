@@ -221,11 +221,19 @@ directories. Meridian does not edit or garbage-collect those private records.
 | `MERIDIAN_AGY_MAX_PROMPT_BYTES` | `190000` | Optional lower UTF-8 byte bound. `0` disables this secondary bound, not `MERIDIAN_AGY_HISTORY_STEP_BYTES`. |
 | `MERIDIAN_AGY_MAX_STEP_TOKENS` | `52000` | Estimated tokens per submitted input, independently of the byte guard; 1–63000. |
 | `MERIDIAN_AGY_MAX_CONTEXT_TOKENS` | `480000` | Estimated context safety budget derived from a 512K model window; 1–512000. Includes an output reserve. This is not a provider limit or a retention guarantee. |
-| `MERIDIAN_AGY_CHUNKED_HISTORY` | `0` | Set to `1` to opt into experimental multi-step cold replay. The default is one trimmed input. |
+| `MERIDIAN_AGY_CHUNKED_HISTORY` | `0` | Set to `1` to enable bounded multi-step cold replay also for eligible requests without a workspace agent. |
 | `MERIDIAN_AGY_HISTORY_STEP_BYTES` | `180000` | UTF-8 byte bound for all agy inputs, including warm client tool batches; 1–190000. |
-| `MERIDIAN_AGY_HISTORY_MAX_STEPS` | `12` | Total experimental replay inputs including the final request; 1–64. |
+| `MERIDIAN_AGY_HISTORY_MAX_STEPS` | `12` | Total multi-step replay inputs including the final request; 1–64. |
 
 Meridian keeps the head and tail of oversized historical text and tool results and marks the omission. An oversized new typed message returns a 400: shorten it or put the content into a file and reference the file.
+
+Meridian sends up to 600,000 UTF-8 bytes of client system instructions through a
+private workspace agent (`--agent`). It waits for agy to confirm the agent before
+sending input. The instructions count toward the estimated context budget, not
+the per-input bound. A system change starts a fresh process with the new text.
+If that process cannot fit the conversation in one input, Meridian tries
+bounded multi-step replay before single-input trimming. It keeps one input
+for structured output, native capability grants, and exact native restores.
 
 Capacity exhaustion returns 429 with `Retry-After`. No unbounded request queue
 is created. Bodies are capped at 8 MiB; upstream stdout is capped at 16 MiB.
@@ -323,6 +331,22 @@ content; turning it off stops writes but does not immediately erase existing fil
 The provider card exposes capabilities and their practical limits. An attached service
 is configured by its owner. Sign into Google using the official CLI; the desktop
 app does not collect Google credentials or repurpose Claude profile login.
+
+
+## Claude priority pool
+
+Combined mode can use the one signed-in agy account as an opt-in Claude
+priority candidate. See [profile order](profiles.md#use-the-signed-in-agy-account-in-the-claude-priority-pool).
+The candidate supports exact catalog variants of `claude-sonnet-5-5` and
+`claude-opus-5-5`. It uses the matching low, medium or high model slug, not
+the CLI effort flag. Without explicit effort, Meridian selects high if listed.
+This is Meridian policy, not a guarantee about Claude’s own default effort.
+
+Client tool rounds require the existing agy bridge and durable agy state.
+The saved delivery proof retains the existing 30-minute and 128-entry limits.
+A long permission wait can outlast that proof. If the proof is missing,
+Meridian refuses the continuation rather than starting it on another account.
+Native browser and subagent grants are not eligible for this pool.
 
 ## Compatibility and operational contract
 

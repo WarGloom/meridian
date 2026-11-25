@@ -44,7 +44,34 @@ Own the operator's **Claude accounts** and decide which one serves a request:
   stay per profile.
 - The `x-meridian-profile` pin always wins over any routing mode.
 - Claude profiles never hold ChatGPT credentials (those live in
-  [`chatgpt-backend`](chatgpt/SPEC.md)); routing never crosses providers.
+  [`chatgpt-backend`](chatgpt/SPEC.md)). The combined Claude priority pool may
+  select the single signed-in agy account for exact Claude model matches.
+  agy does not become a Claude credential or join Claude quota accounting.
+
+### Antigravity in the Claude priority pool
+
+In combined mode, explicitly put `agy-account` in the existing priority
+order. The token at the end follows all Claude accounts, including unlisted
+ones. Else it precedes the next named Claude account. A real account with the
+same ID prevents enrollment. Manual Claude active priority and pins stay
+unchanged. Attested keyed requests can use agy after exact catalog and request
+compatibility checks. No agy attempt substitutes another model or tier.
+
+Both stores use the existing attempt claim and priority assignment fields.
+An agy assignment uses a reserved, route-specific key which has no Claude
+mapping. Stage it before output and finalize under the same attempt token.
+Do not fall back on partial output, exposed tools, cancellation or uncertain
+publication. Count agy output when the CLI produces it, even if a subsequent
+refusal clears buffered events before delivery. A cancelled, unexposed attempt
+can release its claim after a confirmed rollback. Only provider quota refusals
+bench agy. Local capacity and account checks never update quota marks, but can
+shorten the reported pool wait without replacing the last account refusal.
+
+Tool rounds stay with their owner. Validate the paired client results against
+the saved agy delivery witness. Missing or expired proof returns a conflict,
+not a new inference or a Claude retry. A backend transition on a new eligible
+turn replays the full supplied history. Do not mix old and new writers against
+a shared store or downgrade with outstanding agy tool rounds.
 
 User-facing behavior: `docs/profiles.md`. Throttling and `[1m]` bench scope:
 [`architecture`](../../ARCHITECTURE.md) → *Throttling Contract*.

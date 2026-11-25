@@ -9800,6 +9800,22 @@ The next turn completed. The 320,028-byte typed message was rejected; the next
 turn completed with the rejected message still in history. A small planned
 frame was byte-identical before and after. Native tool grants were disabled.
 
+**Custom-agent system delivery (agy 1.5.16, Linux x64):** Use the same private
+source setup with chunked replay enabled and `gemini-4-argon-high`. Send about
+145 KB of system text with head, middle and tail receipts, six completed tool
+pairs of 24 KB each, and a 40 KB newest background report with independent head
+and tail receipts.
+At `f76ade72` the request returned 400 before any stdin input. With system text
+in the custom agent, the 147,793-byte history step kept all six IDs paired.
+The 43,457-byte final step kept the 40,196-byte report intact. The reply
+returned all system and report receipts plus a receipt from the history step.
+The warm follow-up returned a client tool call; its result resumed the same
+process. Native restore used `--conversation` and `--agent`. Changed system
+text selected a fresh agent and took effect. The policy audit recorded a
+denied native file read. An input-free CLI check confirmed the selected agent
+in the init event on both a fresh and a restored conversation.
+The default replay path is covered by the system-change case in
+`antigravity-context-budget.test.ts`, not a live OpenCode run.
 
 
 ## Maintained actual-client profile history probe
