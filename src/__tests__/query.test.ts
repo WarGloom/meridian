@@ -8,7 +8,7 @@ installSdkMock(() => ({
   createSdkMcpServer: () => ({ type: "sdk", name: "passthrough", instance: {} }),
   tool: () => ({}),
 }), "query.test.ts")
-import { buildQueryOptions, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, SCRATCHPAD_COUNTER_INSTRUCTION, resolveQueryConfigDir, singleTurnCapLiftRaisesBudget, type QueryContext } from "../proxy/query"
+import { buildQueryOptions, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, SILENT_TURN_NOTICE_NOTE, SCRATCHPAD_COUNTER_INSTRUCTION, resolveQueryConfigDir, singleTurnCapLiftRaisesBudget, type QueryContext } from "../proxy/query"
 import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS } from "../proxy/tools"
 import { CHERRY_BLOCKED_BUILTIN_TOOLS, CHERRY_INCOMPATIBLE_TOOLS, CHERRY_WEB_TOOLS } from "../proxy/adapters/cherry"
 import { createPassthroughMcpServer } from "../proxy/passthroughTools"
@@ -409,12 +409,12 @@ describe("buildQueryOptions", () => {
   it("uses raw system prompt in passthrough mode", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Be helpful" + REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+    expect(sp).toBe("Be helpful" + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
   })
 
   it("preserves the SDK default preset and adds transport provenance when context is empty", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "" }))
-    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
+    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE })
   })
 
   it("includes resume session ID when provided", () => {
@@ -571,7 +571,7 @@ describe("buildQueryOptions", () => {
       systemContext: "",
       // No clientWorkingDirectory so cwdNote is empty
     }))
-    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
   })
 
   it("strips API keys from environment", () => {
@@ -721,12 +721,12 @@ describe("buildQueryOptions", () => {
     expect(sp.type).toBe("preset")
     expect(sp.preset).toBe("claude_code")
     // No client context to append, so the gitStatus note (#694) stands alone.
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("keeps the SDK default preset with transport provenance when no context or settings exist", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "", settingSources: [] }))
-    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE })
+    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE })
   })
 
   it("passes settingSources and memory settings to SDK options", () => {
@@ -958,7 +958,7 @@ describe("buildQueryOptions", () => {
       codeSystemPrompt: false,
     }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Agent instructions" + REPLAY_PROVENANCE_NOTE)
+    expect(sp).toBe("Agent instructions" + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("does not reintroduce the disabled preset when attaching transport provenance", () => {
@@ -970,7 +970,7 @@ describe("buildQueryOptions", () => {
       systemContext: "",
       codeSystemPrompt: false,
     }))
-    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("drops the client prompt from the append when clientSystemPrompt is false", () => {
@@ -985,7 +985,7 @@ describe("buildQueryOptions", () => {
     // The guard: the client's prompt is suppressed. Meridian's own gitStatus
     // note is not client content, so it stays.
     expect(sp.append).not.toContain("Agent instructions")
-    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE)
+    expect(sp.append).toBe(GIT_STATUS_PROVENANCE_NOTE + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("keeps the proxy/client CWD boundary when clientSystemPrompt is false", () => {
@@ -1015,7 +1015,7 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPrompt: false,
     }))
-    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION })
+    expect(result.options.systemPrompt).toEqual({ type: "preset", preset: "claude_code", append: REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION })
   })
 
   it("includes client prompt when clientSystemPrompt is true (default)", () => {
@@ -1024,7 +1024,7 @@ describe("buildQueryOptions", () => {
       systemContext: "Agent instructions",
       clientSystemPrompt: true,
     }))
-    expect(result.options.systemPrompt).toBe("Agent instructions" + REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+    expect(result.options.systemPrompt).toBe("Agent instructions" + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
   })
 
   it("retains preset and client context while isolating passthrough filesystem settings", () => {
@@ -1052,7 +1052,7 @@ describe("buildQueryOptions", () => {
       codeSystemPrompt: false,
       clientSystemPrompt: false,
     }))
-    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(result.options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 })
 

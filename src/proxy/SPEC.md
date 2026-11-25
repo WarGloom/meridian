@@ -53,6 +53,15 @@ Contract*, *Cancellation Contract*; public routes and headers are in
 
 ## Decisions
 
+- **Claude Agent SDK prompts include a no-output retry note.** The runtime
+  can inject a user-role notice after a response with no visible text. The
+  note quotes the notice as a reference, identifies the SDK runtime as its author,
+  and tells the model not to react to it. If there is no work or result to
+  report, a single period satisfies the retry without a status line. Another
+  empty completion can cause a resend or error. The note applies regardless of
+  preset, client prompt settings or passthrough, and does not apply to the agy
+  runtime.
+
 - **Streaming failure events describe unrecovered turns.** After SDK error
   classification, a usable captured/uncaptured tool handoff or capped-turn
   truncation logs `upstream.completed` with the normal streaming fields plus

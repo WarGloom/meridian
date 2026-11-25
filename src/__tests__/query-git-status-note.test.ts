@@ -9,7 +9,7 @@
  * reports having destroyed the user's uncommitted changes (#694).
  */
 import { describe, it, expect } from "bun:test"
-import { buildQueryOptions, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, type QueryContext } from "../proxy/query"
+import { buildQueryOptions, GIT_STATUS_PROVENANCE_NOTE, REPLAY_PROVENANCE_NOTE, SILENT_TURN_NOTICE_NOTE, type QueryContext } from "../proxy/query"
 import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS } from "../proxy/tools"
 
 /** Mirrors the shared context helper in query.test.ts. */
@@ -45,6 +45,22 @@ function presetAppend(overrides: Partial<QueryContext> = {}): string {
   }
   return (sp as { append?: string }).append ?? ""
 }
+
+describe("buildQueryOptions: Claude Code retry notice", () => {
+  it.each([
+    ["explicit preset", { codeSystemPrompt: true, systemContext: "Be helpful." }],
+    ["default preset", {}],
+    ["client replacement in passthrough", { passthrough: true, systemContext: "Be helpful." }],
+    ["opt-outs on resume", { codeSystemPrompt: false, clientSystemPrompt: false, resumeSessionId: "abc-123" }],
+  ] satisfies [string, Partial<QueryContext>][])("includes a quoted runtime notice with %s", (_name, overrides) => {
+    const { options: { systemPrompt } } = buildQueryOptions(ctx(overrides))
+    const instructions = Array.isArray(systemPrompt) ? undefined
+      : typeof systemPrompt === "string" ? systemPrompt : systemPrompt?.append
+    expect(instructions).toMatch(
+      /<meridian-note>\n[^<]*"\[Your previous response had no visible output\. Please continue and produce a user-visible response\.\]"[^<]*<\/meridian-note>/,
+    )
+  })
+})
 
 describe("GIT_STATUS_PROVENANCE_NOTE", () => {
   it("contradicts the preset's 'start of the conversation' claim", () => {
@@ -111,14 +127,14 @@ describe("buildQueryOptions — gitStatus note placement", () => {
       codeSystemPrompt: false,
       systemContext: "You are helpful.",
     }))
-    expect(options.systemPrompt).toBe("You are helpful." + REPLAY_PROVENANCE_NOTE)
+    expect(options.systemPrompt).toBe("You are helpful." + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("keeps the preset off while retaining transport provenance", () => {
     // Regression guard for the #489 follow-up: `{}` would let the SDK
     // reintroduce the preset.
     const { options } = buildQueryOptions(ctx({ codeSystemPrompt: false }))
-    expect(options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE)
+    expect(options.systemPrompt).toBe(REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE)
   })
 
   it("applies to passthrough requests, where the bug was reported", () => {

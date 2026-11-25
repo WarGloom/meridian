@@ -72,7 +72,7 @@ installMcpToolsMock(() => ({
 }))
 
 const { createProxyServer, clearSessionCache } = await import("../proxy/server")
-const { REPLAY_PROVENANCE_NOTE, SCRATCHPAD_COUNTER_INSTRUCTION, buildNoClientCwdNote } = await import("../proxy/query")
+const { REPLAY_PROVENANCE_NOTE, SILENT_TURN_NOTICE_NOTE, SCRATCHPAD_COUNTER_INSTRUCTION, buildNoClientCwdNote } = await import("../proxy/query")
 
 const testProxies: ReturnType<typeof createProxyServer>[] = []
 
@@ -352,7 +352,7 @@ describe("POST /v1/chat/completions — non-streaming", () => {
       ],
     })
 
-    expect(capturedOptions?.systemPrompt).toBe("You are TestBot. Reply with exactly: ZEBRA-7" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+    expect(capturedOptions?.systemPrompt).toBe("You are TestBot. Reply with exactly: ZEBRA-7" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
   })
 
   it("response has Content-Type application/json", async () => {
@@ -466,7 +466,7 @@ describe("POST /v1/chat/completions — Jcode session continuity", () => {
     expect(capturedOptionHistory[0]?.resume).toBeUndefined()
     expect(capturedOptionHistory[0]?.sessionId).toMatch(/^[0-9a-f-]{36}$/)
     expect(capturedOptionHistory[1]?.resume).toBe(capturedOptionHistory[0]?.sessionId)
-    expect(capturedOptionHistory[1]?.systemPrompt).toBe("stable system" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+    expect(capturedOptionHistory[1]?.systemPrompt).toBe("stable system" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
   })
 
   it("keeps distinct Jcode session keys isolated", async () => {
@@ -580,7 +580,7 @@ describe("POST /v1/chat/completions — session-keyed continuity for the generic
       // Turn 2 is a continuation of turn 1's SDK session, so the key reached
       // the inner hop and its lineage verified the full history.
       expect(capturedOptionHistory[1]?.resume).toBe(capturedOptionHistory[0]?.sessionId)
-      expect(capturedOptionHistory[1]?.systemPrompt).toBe("stable system" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
+      expect(capturedOptionHistory[1]?.systemPrompt).toBe("stable system" + buildNoClientCwdNote(process.cwd(), true) + REPLAY_PROVENANCE_NOTE + SILENT_TURN_NOTICE_NOTE + SCRATCHPAD_COUNTER_INSTRUCTION)
 
       // The inner body carried the full messages array, unpacked, and the key
       // itself was forwarded on the inner hop. The adapter tag stays `openai`.
