@@ -1,6 +1,6 @@
 import { AntigravityError, blocks, latestTypedRequest, renderAgPrompt, type AgMessage, type AgRequest } from './antigravityProtocol'
 import { estimateAgTextTokens, agTextTokenWeight } from './antigravityTokens'
-import { assertAgStep, fitAgStep, type AgStepObserver } from './antigravityStepBudget'
+import { AgStepBudgetError, assertAgStep, fitAgStep, type AgStepObserver } from './antigravityStepBudget'
 
 export interface AgHistoryLimits {
   chunked: boolean
@@ -86,10 +86,10 @@ export function planAgHistory(request: AgRequest, native: string[], suffix: stri
       tokens += unitTokens + (chunk.length ? 0.25 : 0)
       chunk.push(...unit)
     }
-    if (steps.length + 1 >= maxSteps) throw new AntigravityError(`prompt is too long: cold history replay exceeds ${maxSteps} input steps; compact the conversation or raise MERIDIAN_AGY_HISTORY_MAX_STEPS`)
+    if (steps.length + 1 >= maxSteps) throw new AgStepBudgetError(Buffer.byteLength(full), `Cold history replay exceeds ${maxSteps} input steps`)
   }
   if (chunk.length) steps.push(AG_HISTORY_PREFIX + JSON.stringify(chunk))
   steps.push(final)
-  if (steps.length > maxSteps) throw new AntigravityError(`prompt is too long: cold history replay exceeds ${maxSteps} input steps`)
+  if (steps.length > maxSteps) throw new AgStepBudgetError(Buffer.byteLength(full), `Cold history replay exceeds ${maxSteps} input steps`)
   return steps
 }

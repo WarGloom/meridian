@@ -15,11 +15,21 @@ export class AntigravityError extends Error {
 }
 
 /** Preserve actionable account failures without retrying a potentially executed tool. */
-export function classifyAgFailure(message: string): AntigravityError {
+export class AgPoolFailure extends AntigravityError {
+  readonly kind: "provider_quota" | "capacity" | "account_cooldown"
+  constructor(kind: AgPoolFailure["kind"], message: string, retryAfter: number) {
+    super(message, kind === "account_cooldown" ? 503 : 429, kind === "account_cooldown" ? "api_error" : "rate_limit_error", retryAfter)
+    this.kind = kind
+  }
+}
+
+export function classifyAgFailure(message: string, providerResult = false): AntigravityError {
   if (/INVALID_ARGUMENT/.test(message)) return new AntigravityError(message)
   if (/rate.?limit|quota|resource.exhausted|too many requests|\b429\b/i.test(message)) {
     const seconds = /retry(?:[- ]after| in)[:= ]+(\d+)\s*(?:s|seconds)?/i.exec(message)?.[1]
-    return new AntigravityError(message, 429, "rate_limit_error", seconds ? Math.min(86400, Math.max(1, Number(seconds))) : 60)
+    const wait = seconds ? Math.min(86400, Math.max(1, Number(seconds))) : 60
+    return providerResult ? new AgPoolFailure("provider_quota", message, wait)
+      : new AntigravityError(message, 429, "rate_limit_error", wait)
   }
   if (/unauthenticated|authentication required|sign.?in required|login required|token expired/i.test(message)) return new AntigravityError(message, 401, "authentication_error")
   if (/overloaded|service unavailable|\b503\b|\b529\b/i.test(message)) return new AntigravityError(message, 503, "overloaded_error")
@@ -319,6 +329,9 @@ export function toolChoiceInstruction(request: AgRequest, inlineToolSchemas = tr
   const parallel = parallelAgTool(request, inlineToolSchemas)
   return instruction + (parallel ? `\nFor independent parallel client actions, call the meridian_client MCP tool ${parallel.name} with {calls:[{name,arguments},...]}. It delivers those calls together to the client.\n` + (inlineToolSchemas ? JSON.stringify(parallel) : "") : "") + (inlineToolSchemas ? "\nThe complete client tool definitions for this response follow. Use these exact schemas; do not read CLI metadata files to discover tools.\n" + JSON.stringify(availableAgTools(request)) : "\nClient tools and their exact schemas come from the meridian_client MCP catalog; do not read CLI metadata files to discover tools.\nClient tool names: " + JSON.stringify(availableAgTools(request).map(tool => tool.name)))
 }
+export function agSystemText(request: AgRequest): string {
+  return typeof request.system === "string" ? request.system : request.system?.map(b => b.text).join("\n") ?? ""
+}
 export function renderAgPrompt(request: AgRequest, nativeTools: string[] = [], omitted = false, inlineToolSchemas = true): string {
   return [
     "You are serving a client through Meridian. Follow the client's instructions and answer its latest user message.",
@@ -329,7 +342,7 @@ export function renderAgPrompt(request: AgRequest, nativeTools: string[] = [], o
     toolChoiceInstruction(request, inlineToolSchemas),
     request.output_config?.format ? "Submit the final response using the native finish tool. The full client schema below is authoritative; Meridian validates all its constraints even when the CLI transport cannot express them. Intermediate tool calls are allowed when the client permits them.\n" + JSON.stringify(request.output_config.format.schema) : "",
     "Image attachment references are created by Meridian from client-supplied bytes. Inspect each relevant attachment with view_file using its exact absolute path. Those are the only permitted filesystem reads.",
-    "Client system instructions:\n" + (typeof request.system === "string" ? request.system : request.system?.map(b => b.text).join("\n") ?? ""),
+    "Client system instructions:\n" + agSystemText(request),
     omitted ? AG_OMIT_NOTE : "",
     "Client conversation:\n" + JSON.stringify(request.messages),
   ].filter(Boolean).join("\n\n")
@@ -459,8 +472,13 @@ export class AgEventQueue {
   private items: AgEvent[] = []
   private waiter?: (event: AgEvent) => void
   private failure?: Error
+  private observedOutput = false
+  get hasOutput(): boolean { return this.observedOutput }
+  observeOutput(): void { this.observedOutput = true }
+  finishResponse(): void { this.observedOutput = this.items.some(event => event.kind === "text" || event.kind === "tool") }
   push(event: AgEvent): void {
     if (this.failure) return
+    if (event.kind === "text" || event.kind === "tool") this.observeOutput()
     if (this.waiter) { const waiter = this.waiter; this.waiter = undefined; waiter(event) }
     else {
       if (this.items.length >= 8192) { this.fail(new Error("Antigravity event buffer exceeded")); return }

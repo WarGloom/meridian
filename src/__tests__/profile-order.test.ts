@@ -189,7 +189,7 @@ describe("moveWithinGroup", () => {
 
 describe("the drag gesture keeps a card among its own provider's cards", () => {
   // The cards a page draws: grouped by provider, data-index across the page.
-  function harness() {
+  function harness(order?: readonly string[]) {
     const content: Record<string, (e: unknown) => void> = {}
     const doc: Record<string, (e?: unknown) => void> = {}
     const saves: string[][] = []
@@ -229,8 +229,9 @@ describe("the drag gesture keeps a card among its own provider's cards", () => {
     }
     sandbox.window = sandbox
     runInNewContext(reorderClientJs, sandbox)
-    const reorder = sandbox.meridianReorder as { init(o: { onSaved(): void }): void }
+    const reorder = sandbox.meridianReorder as { init(o: { onSaved(): void }): void; adopt(cfg: { profileOrder: readonly string[] }): void }
     reorder.init({ onSaved() {} })
+    if (order) reorder.adopt({ profileOrder: order })
     const at = (id: string) => cards.find(c => c.card.dataset && (c.card.dataset as { id: string }).id === id)!
     const settle = () => new Promise(resolve => setTimeout(resolve, 0))
     return {
@@ -279,5 +280,12 @@ describe("the drag gesture keeps a card among its own provider's cards", () => {
     await h.settle()
     expect(h.saves).toEqual([["c1", "c2", "g2", "g1"]])
     expect(h.status.textContent).toBe("g1 moved to position 2 of 2.")
+  })
+
+  it("keeps an enrolled agy slot before its Claude anchor when reordering cards", async () => {
+    const h = harness(["c1", "agy-account", "c2", "g1", "g2"])
+    h.key("c2", "ArrowUp")
+    await h.settle()
+    expect(h.saves).toEqual([["agy-account", "c2", "c1", "g1", "g2"]])
   })
 })

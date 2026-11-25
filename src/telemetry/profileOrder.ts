@@ -303,6 +303,14 @@ window.meridianReorder = (function () {
 
   function save(order, message) {
     var previous = state.order;
+    var agy = previous.indexOf('agy-account');
+    if (agy >= 0 && order.indexOf('agy-account') < 0) {
+      var groups = currentGroups();
+      var visible = currentOrderIds();
+      var anchor = previous.slice(agy + 1).find(function (id) { return groups[visible.indexOf(id)] === 'claude'; });
+      var index = order.indexOf(anchor);
+      order.splice(index < 0 ? order.length : index, 0, 'agy-account');
+    }
     state.order = order;
     return fetch('/settings/api/routing', {
       method: 'PUT',

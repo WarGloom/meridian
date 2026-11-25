@@ -37,6 +37,24 @@ export class AgCompletedAnswers {
   private key(request: AgRequest, scope: string, requestId?: string) {
     return createHash('sha256').update(stable(requestId ? [scope, 'request', requestId] : [scope, contractKey(request), historyKey(request.messages), request.tool_choice])).digest('hex')
   }
+  poolRequestId(request: AgRequest): string {
+    return 'pool:' + createHash('sha256').update(stable([contractKey(request), historyKey(request.messages)])).digest('hex')
+  }
+
+  hasPoolToolWitness(request: AgRequest, scope: string): boolean {
+    const index = request.messages.findLastIndex(message => message.role === 'assistant')
+    const delivered = request.messages[index]
+    if (!delivered || !blocks(delivered).some(block => block.type === 'tool_use')) return false
+    const prior = { ...request, messages: request.messages.slice(0, index) }
+    try {
+      const saved = this.store.get(this.key(prior, scope, this.poolRequestId(prior)), scope)
+      if (!Array.isArray(saved.response.content) || saved.response.stop_reason !== 'tool_use') return false
+      return stable(saved.response.content) === stable(blocks(delivered))
+    } catch (error) {
+      if (error instanceof AntigravityError && error.status === 404) return false
+      throw error
+    }
+  }
   eligible(request: AgRequest) {
     return blocks(request.messages.at(-1)!).some(block => block.type === 'tool_result')
   }

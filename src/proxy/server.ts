@@ -69,7 +69,7 @@ import { isSameOriginRequest } from "../sameOrigin"
 import { resolveSdkWorkingDirectory } from "./cwd"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG, resolveBackendConfig } from "./types"
-import { createAntigravityServer } from "./backends/antigravity"
+import { createAntigravityServer, type AgPoolLifecycle } from "./backends/antigravity"
 import { env, envBool, envInt, envIntValue, envVarSource } from "../env"
 import { installErrorReporter } from "../errorReporting"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
@@ -174,7 +174,7 @@ import {
   type RootReservation,
 } from "./transcriptSweep"
 import { transcriptRetentionSettingsResponse } from "./transcriptRetentionSettings"
-import { normalizeEffort } from "./effort"
+import { normalizeEffort, readClientEffort, type AgyClaudeModelSlug } from "./effort"
 import { parseOutputFormat, structuredOutputText } from "./structuredOutput"
 import { runTransformHook, buildPipeline, createRequestContext } from "./transform"
 import { inspectExecutionHistory } from "./executionHistory"
@@ -196,6 +196,8 @@ import {
   getPriorityFailbackPolicy,
   shouldPromotePriorityAssignment,
   resolvePriorityOrder,
+  resolveClaudePoolOrder,
+  AGY_ACCOUNT_ID,
   choosePriorityProfile,
   chooseActivePriorityCandidates,
   lastMappedProfile,
@@ -259,6 +261,7 @@ import {
   type TokenUsage,
 } from "./session/lineage"
 import { getConversationFingerprint, getPriorityAssignmentKey } from "./session/fingerprint"
+import { isAgyAssignmentKey } from "./session/bookkeeping/legacyCodec"
 // Re-export for backwards compatibility (existing tests import from here)
 
 import {
@@ -300,6 +303,10 @@ import {
   claimPriorityAttempt,
   releasePriorityAttempt,
   blockPriorityAttempt,
+  decodeAgyPriorityAssignment,
+  storeAgyPriorityAssignment,
+  finalizeSharedSessionAndPriorityAssignment,
+  rollbackSharedSessionAndPriorityAssignment,
   listStoredSessions,
   readSessionTranscriptPins,
   readSessionStoreGenerationSnapshot,
@@ -477,6 +484,10 @@ interface CacheKeepaliveRegistration {
 interface PriorityAttemptExposure {
   committed: boolean
   reason?: string
+  agyQuota?: { readonly retryAfter: number | undefined }
+  agyUnavailable?: { readonly retryAfter: number | undefined }
+  agyPublicationPending?: boolean
+  finalized?: boolean
 }
 
 interface HandleMessagesOptions {
@@ -793,6 +804,8 @@ type PriorityDispatchOptions = {
   readonly body: any
   readonly requestMeta: RequestMeta
   readonly candidateIds: readonly string[]
+  readonly agy?: { readonly slug: AgyClaudeModelSlug; run(lifecycle: AgPoolLifecycle): Promise<Response> }
+  readonly earliestReset?: number
   readonly sessionKey: string | null
   readonly wantsStream: boolean
   readonly currentProfileId: string | undefined
@@ -1753,6 +1766,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
   // percentages of its last successful read (measured: `5h 67% / 7d 7%` while
   // every request through it was being refused).
   const spentProfiles = new SpentStore()
+  const agyCooldowns = new Map<AgyClaudeModelSlug, number>()
   const profileFactsRefresh = new ProfileFactsRefresh()
   const failoverEvents = new FailoverEventLog()
 
@@ -2020,6 +2034,71 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     requestAbortLink = options.requestAbortLink,
     exposure: PriorityAttemptExposure = { committed: false },
   ) {
+    if (candidate === AGY_ACCOUNT_ID && options.agy && options.durableRoute && options.publicationTurn && attemptOwnerToken) {
+      const { durableRoute, publicationTurn } = options
+      const signal = requestAbortLink?.controller.signal ?? options.context.req.raw.signal
+      let publication: Awaited<ReturnType<typeof storeAgyPriorityAssignment>> = false
+      const rollbackCancelled = async () => {
+        if (signal.aborted && publication && !exposure.committed) {
+          const staged = publication
+          const restored = await admitSessionStoreWrite(() => rollbackSharedSessionAndPriorityAssignment({ ...staged,
+            routeKey: durableRoute.routeKey, attemptOwnerToken,
+            expectedAssignmentGeneration: staged.assignmentGeneration, expectedMappingGeneration: staged.mappingGeneration,
+          }))
+          if (restored) exposure.agyPublicationPending = false
+        }
+        signal.throwIfAborted()
+      }
+      const commit = async () => {
+        const slug = options.agy?.slug
+        if (!slug) throw new Error("Missing Antigravity model")
+        publication = await admitSessionStoreWrite(() => {
+          signal.throwIfAborted()
+          exposure.agyPublicationPending = true
+          return storeAgyPriorityAssignment({ modelSlug: slug, attemptOwnerToken,
+            priority: { routeKey: durableRoute.routeKey, expectedAssignmentGeneration: durableRoute.expectedGeneration,
+              lastHumanTurnDigest: publicationTurn.turnId, lastHumanTurnIssuedAt: publicationTurn.issuedAt },
+          })
+        }, { ...sessionGcOptions, admissionSignal: signal })
+        if (!publication) {
+          exposure.agyPublicationPending = false
+          throw new Error("Antigravity priority assignment changed before publication")
+        }
+        if (signal.aborted) await rollbackCancelled()
+      }
+      const inner = await options.agy.run({
+        expose: () => { exposure.committed = true; exposure.reason = "agy_output" },
+        commit,
+        finalize: async () => {
+          const staged = publication
+          if (!staged) throw new Error("Antigravity priority assignment was not published")
+          let finalizationMayCommit = false
+          try {
+            const finalized = await admitSessionStoreWrite(() => {
+              signal.throwIfAborted()
+              return finalizeSharedSessionAndPriorityAssignment({
+                key: staged.key, routeKey: durableRoute.routeKey, attemptOwnerToken,
+                expectedAssignmentGeneration: staged.assignmentGeneration, expectedMappingGeneration: staged.mappingGeneration,
+                rollbackMappingKey: staged.previousAssignment?.mappingKey !== staged.key ? staged.previousAssignment?.mappingKey : undefined,
+              }, () => {
+                signal.throwIfAborted()
+                finalizationMayCommit = true
+              })
+            }, { ...sessionGcOptions, admissionSignal: signal })
+            if (!finalized) throw new Error("Antigravity priority assignment changed before finalization")
+          } catch (error) {
+            if (signal.aborted && !finalizationMayCommit) await rollbackCancelled()
+            throw error
+          }
+          exposure.agyPublicationPending = false
+          exposure.finalized = true
+        },
+        quota: retryAfter => { exposure.agyQuota = { retryAfter } },
+        unavailable: retryAfter => { exposure.agyUnavailable = { retryAfter } },
+        completion: (response, done) => { responseCompletions.set(response, done) },
+      })
+      return { inner, exposure }
+    }
     const priorityPublication = options.durableRoute && options.publicationTurn
       ? {
           routeKey: options.durableRoute.routeKey,
@@ -2132,6 +2211,17 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     return until
   }
 
+  async function markPoolFailure(options: PriorityDispatchOptions, candidate: string, reason: string, sharedQuota: Set<string>, exposure: PriorityAttemptExposure): Promise<number> {
+    if (candidate === AGY_ACCOUNT_ID && options.agy && exposure.agyQuota) {
+      const wait = retryAfterSeconds({ status: 429,
+        upstreamRetryAfter: exposure.agyQuota.retryAfter === undefined ? undefined : String(exposure.agyQuota.retryAfter) }) ?? 60
+      const until = Math.max(Date.now() + wait * 1000, agyCooldowns.get(options.agy.slug) ?? 0)
+      agyCooldowns.set(options.agy.slug, until)
+      return until
+    }
+    return markPriorityFailure(candidate, reason, sharedQuota, options.modelFamily)
+  }
+
   /** Streaming priority dispatch, entered once an account answers with SSE:
    *  that attempt and every later candidate run INSIDE the client-facing
    *  stream.
@@ -2202,6 +2292,12 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               ? start
               : await runPriorityAttempt(options, attempt, candidate, attemptOwnerToken, requestAbort, activeExposure)
             lastInner = inner
+            const agyAttempt = candidate === AGY_ACCOUNT_ID && options.agy !== undefined
+            if (agyAttempt && exposure.agyUnavailable && (lastError !== null || attempt + 1 < options.candidateIds.length)) {
+              const wait = exposure.agyUnavailable.retryAfter
+              if (wait !== undefined) earliestPoolReset = Math.min(earliestPoolReset ?? Infinity, Date.now() + wait * 1000)
+              continue
+            }
             const verdict = await relayStreamAttempt(inner, { ...sink, isCancelled })
             if (verdict.kind === "suppressed") {
               // Cancel BEFORE joining cleanup, then read the final exposure
@@ -2210,7 +2306,13 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               await verdict.discard()
               await responseCompletions.get(inner)?.catch(() => {})
               const reason = verdict.errorType
-              const cooldownUntil = await markPriorityFailure(candidate, reason, start.sharedQuota, options.modelFamily)
+              if (agyAttempt && !exposure.agyQuota) {
+                if (!(await settle(exposure.committed || exposure.agyPublicationPending ? "block" : "release"))) { await enqueue(unavailableFrame()); return }
+                sink.onMeaningfulForwarded()
+                for (const chunk of verdict.held) await enqueue(chunk)
+                return
+              }
+              const cooldownUntil = await markPoolFailure(options, candidate, reason, start.sharedQuota, exposure)
               if (isCancelled()) break
               earliestPoolReset = Math.min(earliestPoolReset ?? cooldownUntil, cooldownUntil)
               lastError = verdict.errorPayload
@@ -2236,6 +2338,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               continue
             }
             if (isCancelled()) break
+            if (agyAttempt) {
+              await responseCompletions.get(inner)?.catch(() => {})
+              if (!exposure.finalized) await settle(exposure.committed || exposure.agyPublicationPending ? "block" : "release")
+            }
             if (options.sessionKey && !options.durableRoute) {
               // Process memory preserves only legacy/keyless new-conversation
               // affinity. Trusted attempts publish authority at the atomic
@@ -2321,7 +2427,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               if (lastInner) await responseCompletions.get(lastInner)?.catch(() => {})
             } finally {
               // Settle only after cleanup, when the exposure barrier is final.
-              if (isCancelled() || failedUnexpectedly) await settle(activeExposure?.committed ? "block" : "release")
+              if (isCancelled() || failedUnexpectedly) await settle(activeExposure?.committed || activeExposure?.agyPublicationPending ? "block" : "release")
               if (!options.requestAbortLink) requestAbort.detach()
               resolveOuterCompletion()
             }
@@ -2400,13 +2506,20 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // When every candidate is spent, the honest wait is until the FIRST one
     // frees up, not the last one tried. Tracked across the loop so the caller's
     // Retry-After names the pool's earliest opening (#901).
-    let earliestPoolReset: number | null = null
+    let earliestPoolReset: number | null = options.earliestReset ?? null
     // Profiles a refusal in THIS request already spoke for: one account under
     // another name, so asking it again only repeats the answer.
     const sharedQuota = new Set<string>()
     for (const [attempt, candidate] of options.candidateIds.entries()) {
       if (sharedQuota.has(candidate)) continue
+      if (options.requestAbortLink?.controller.signal.aborted || options.context.req.raw.signal.aborted) break
       const { inner, exposure } = await runPriorityAttempt(options, attempt, candidate, attemptOwnerToken)
+      const agyAttempt = candidate === AGY_ACCOUNT_ID && options.agy !== undefined
+      if (agyAttempt && exposure.agyUnavailable && (lastError !== null || attempt + 1 < options.candidateIds.length)) {
+        const wait = exposure.agyUnavailable.retryAfter
+        if (wait !== undefined) earliestPoolReset = Math.min(earliestPoolReset ?? Infinity, Date.now() + wait * 1000)
+        continue
+      }
       // A non-SSE answer is decided here and keeps its HTTP status. Once an
       // account streams, headers go out and the remaining candidates are
       // tried inside the stream.
@@ -2416,7 +2529,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         })
       }
       const sniffed = await sniffAccountFailure(inner)
-      if (!sniffed.failed) {
+      if (!sniffed.failed || (agyAttempt && !exposure.agyQuota)) {
+        if (agyAttempt && !exposure.finalized && !(await settleAttempt(exposure.committed || exposure.agyPublicationPending ? "block" : "release"))) return unavailableAttemptResponse()
         if (options.sessionKey && !options.durableRoute) {
           // Process memory preserves only legacy/keyless new-conversation
           // affinity. Trusted attempts publish authority at the atomic durable
@@ -2451,7 +2565,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       const reason = sniffed.errorType
       // Only a quota refusal has a reset to look up. Both cooldown tiers read
       // the account's five-hour window, which says nothing about entitlement.
-      const cooldownUntil = await markPriorityFailure(candidate, reason, sharedQuota, options.modelFamily)
+      const cooldownUntil = await markPoolFailure(options, candidate, reason, sharedQuota, exposure)
       if (earliestPoolReset === null || cooldownUntil < earliestPoolReset) {
         earliestPoolReset = cooldownUntil
       }
@@ -2911,6 +3025,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             400
           )
         }
+        const adapterSessionId = adapter.getSessionId(c, body)
+        if (adapterSessionId && isAgyAssignmentKey(adapterSessionId)) {
+          return c.json({ type: "error", error: { type: "invalid_request_error", message: "Session ID uses a reserved namespace" } }, 400)
+        }
         // Keep request-scoped client metadata available to the model, but do
         // not persist it as durable conversation ancestry.
         const lineageMessages = adapter.canonicalizeMessagesForLineage?.(body.messages)
@@ -2951,25 +3069,68 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         const routingMode = getRoutingMode(process.env.MERIDIAN_ROUTING ?? getSetting("routing"))
         attributedRoutingMode = routingMode
         // Priority mode (opt-in): unpinned requests are dispatched across the
-        if (isPoolRouting(routingMode) && !options.forcedProfileId && !c.req.header("x-meridian-profile")) {
+        const pin = c.req.header("x-meridian-profile")
+        const messages: readonly unknown[] = body.messages
+        const tail = messages.slice(messages.findLastIndex(m => m !== null && typeof m === "object" && "role" in m && m.role === "assistant") + 1)
+        const resultIds = tail.flatMap(message => {
+          if (!message || typeof message !== "object" || !("content" in message) || !Array.isArray(message.content)) return []
+          const content: readonly unknown[] = message.content
+          return content.flatMap(block => block && typeof block === "object" && "type" in block && block.type === "tool_result"
+            && "tool_use_id" in block && typeof block.tool_use_id === "string" ? [block.tool_use_id] : [])
+        })
+        const agyResults = resultIds.some(id => id.startsWith("toolu_agy_"))
+        const agyConflict = () => c.json({ type: "error", error: { type: "invalid_request_error", message: "Antigravity tool results require their original priority owner" } }, 409)
+        if (agyResults && (!isPoolRouting(routingMode) || options.forcedProfileId || pin || !adapterSessionId
+          || resultIds.some(id => !id.startsWith("toolu_agy_")))) return agyConflict()
+        const routeKey = adapterSessionId && !options.forcedProfileId ? adapter.name + ":" + adapterSessionId : undefined
+        const combinedRoute = routeKey && antigravity ? lookupPriorityAssignmentResult(routeKey) : undefined
+        const combinedOwner = combinedRoute?.status === "found" ? combinedRoute.assignment : undefined
+        const combinedAgy = routeKey && combinedOwner ? decodeAgyPriorityAssignment(routeKey, combinedOwner) : undefined
+        if (combinedRoute?.status === "error") return c.json({ type: "error", error: { type: "overloaded_error", message: "Durable priority routing state is unavailable" } }, 503, TRANSIENT_RETRY_AFTER_HEADERS)
+        if (combinedAgy && combinedRoute?.attempt) return agyConflict()
+        if (isPoolRouting(routingMode) && !options.forcedProfileId && !pin) {
           const effectivePool = getEffectiveProfiles(finalConfig.profiles)
-          if (effectivePool.length > 1) {
-            const { order: configuredOrder, unknown: notClaude } = resolvePriorityOrder(effectivePool.map(p => p.id), priorityProfileOrderSetting())
-            // The saved order lists ChatGPT seats as well; those are not typos.
-            const unknown = notClaude.filter(id => !chatGptProfiles?.resolve(id))
+          const pool = resolveClaudePoolOrder({ claudeIds: effectivePool.map(p => p.id), combined: !!antigravity,
+            otherIds: chatGptProfiles?.profiles().map(p => p.id) ?? [], order: priorityProfileOrderSetting() })
+          if (effectivePool.length > 1 || pool.agyEnrollment === "enrolled" || agyResults || combinedAgy) {
+            const unknown = pool.unknown
             if (unknown.length > 0) claudeLog("priority.unknown_order_ids", { unknown })
-            const reserveHolds = currentWeeklyReserveHolds(configuredOrder)
+            const routeResult = combinedRoute ?? (routeKey ? lookupPriorityAssignmentResult(routeKey) : undefined)
+            if (routeResult?.status === "error") return c.json({ type: "error", error: { type: "overloaded_error", message: "Durable priority routing state is unavailable" } }, 503, TRANSIENT_RETRY_AFTER_HEADERS)
+            const stored = routeResult?.status === "found" ? routeResult.assignment : undefined
+            const storedAgy = routeKey && stored ? decodeAgyPriorityAssignment(routeKey, stored) : undefined
+            if (stored && isAgyAssignmentKey(stored.mappingKey) && !storedAgy) return agyConflict()
+            if ((storedAgy && routeResult?.attempt) || (agyResults && (!storedAgy || !antigravity))) return agyConflict()
+            const routeTurn = requestMeta.routingTurnIdentity
+            const replayOnly = storedAgy !== undefined && !agyResults && (!routeTurn || routeTurn.turnId === stored?.lastHumanTurnDigest)
+            const agyRequired = agyResults || replayOnly
+            const adapterBase = adapter.baseName ?? adapter.name
+            const effort = readClientEffort({ header: adapterBase === "polytoken" ? undefined : c.req.header("x-opencode-effort"),
+              body, currentSystemOverride: true })
+            const agy = antigravity && routeKey && (agyRequired || (pool.agyEnrollment === "enrolled" && routeTurn && resultIds.length === 0))
+              && clientMaxOutputTokens === undefined && !c.req.header("x-opencode-task-budget")
+              && !c.req.header("x-opencode-thinking")
+              ? await antigravity.preparePool?.({ body, effort, sessionKey: routeKey, signal: options.requestAbortLink?.controller.signal ?? c.req.raw.signal,
+                  retainedSlug: agyRequired ? storedAgy : undefined, requireToolWitness: agyResults, replayOnly,
+                  forceFresh: !storedAgy })
+              : undefined
+            if (agyRequired && !agy) return agyConflict()
+            const configuredOrder = pool.candidates.filter(candidate => candidate.provider === "claude" || !!agy).map(candidate => candidate.id)
+            if (agy && agyRequired && !configuredOrder.includes(AGY_ACCOUNT_ID)) configuredOrder.push(AGY_ACCOUNT_ID)
+            const isAgyCandidate = (id: string) => id === AGY_ACCOUNT_ID && !!agy
+            const reserveHolds = currentWeeklyReserveHolds(configuredOrder.filter(id => !isAgyCandidate(id)))
             const routable = configuredOrder.filter(id => !reserveHolds.has(id))
             const allReserveHeld = routable.length === 0
             // A per-model weekly bench skips a profile only for requests of
             // that model; profile-wide marks skip it for every request.
             const modelFamily = claudeModelFamily(typeof body.model === "string" ? body.model : "sonnet")
-            const benched = (id: string) => priorityExhaustion.isExhausted(id, modelFamily)
+            const agyReset = agy ? agyCooldowns.get(agy.slug) : undefined
+            const benched = (id: string) => isAgyCandidate(id) ? (agyReset ?? 0) > Date.now() : priorityExhaustion.isExhausted(id, modelFamily)
             const extraUsagePolicy = getClaudeExtraUsagePolicy(process.env.MERIDIAN_CLAUDE_EXTRA_USAGE ?? getSetting("claudeExtraUsage"))
             const extraUsage = orderForExtraUsage(
               allReserveHeld ? configuredOrder : routable,
               extraUsagePolicy,
-              profileDrawsExtraUsage,
+              id => !isAgyCandidate(id) && profileDrawsExtraUsage(id),
               id => !benched(id),
             )
             logExtraUsageLastResort(extraUsage.lastResort)
@@ -2981,7 +3142,6 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             // process-local assignment follows the conversation's root, so a
             // subagent keyed apart from its parent stays on the parent's
             // account (AgentIdentity.getRootSessionId).
-            const adapterSessionId = adapter.getSessionId(c, body)
             const rootSessionId = rootSessionIdOf(adapter, c, body)
             const sessionKey = getPriorityAssignmentKey(
               rootSessionId,
@@ -2999,17 +3159,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
               let durableRoute: PriorityDispatchOptions["durableRoute"]
               let assignment: PriorityAssignment | undefined
               let routeMappingIsCurrent = false
-              if (adapterSessionId) {
-                // Adapter namespacing prevents an unrelated client family from
-                // retaining or adopting an OpenCode route with a colliding ID.
-                const routeKey = `${adapter.name}:${adapterSessionId}`
-                const routeResult = lookupPriorityAssignmentResult(routeKey)
-                if (routeResult.status === "error") {
-                  return c.json({
-                    type: "error",
-                    error: { type: "overloaded_error", message: "Durable priority routing state is unavailable" },
-                  }, 503, TRANSIENT_RETRY_AFTER_HEADERS)
-                }
+              if (routeKey && routeResult) {
                 if (routeResult.status === "found") {
                   durableRoute = { routeKey, expectedGeneration: routeResult.generation }
                   assignment = {
@@ -3045,15 +3195,18 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                       })
                     }
                   }
-                  const mapped = lookupSharedSessionResult(routeResult.assignment.mappingKey)
-                  if (mapped.status === "error") {
+                  const mapped = storedAgy ? undefined : lookupSharedSessionResult(routeResult.assignment.mappingKey)
+                  if (mapped?.status === "error") {
                     return c.json({
                       type: "error",
                       error: { type: "overloaded_error", message: "Durable priority session state is unavailable" },
                     }, 503, TRANSIENT_RETRY_AFTER_HEADERS)
                   }
-                  routeMappingIsCurrent = mapped.status === "found"
-                    && mapped.generation === routeResult.assignment.mappingGeneration
+                  routeMappingIsCurrent = !!storedAgy || (mapped?.status === "found"
+                    && mapped.generation === routeResult.assignment.mappingGeneration)
+                  if (storedAgy && agyRequired) promotionTurn = undefined
+                  if (!storedAgy && mapped?.status === "found" && resultIds.length > 0
+                    && mapped.session.passthroughToolCallIds?.some(id => resultIds.includes(id))) promotionTurn = undefined
                   if (!routeMappingIsCurrent) {
                     // Never resume an unproved mapping generation. Only a fresh,
                     // trusted human-turn proof may atomically repair authority;
@@ -3076,7 +3229,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 } else if (trustedTurn) {
                   durableRoute = { routeKey, expectedGeneration: routeResult.generation }
                   publicationTurn = trustedTurn
-                } else if (sessionKey) {
+                } else if (sessionKey && adapterSessionId) {
                   // A process-local assignment preserves legacy/keyless affinity
                   // but can never create durable promotion authority. A restart
                   // empties it; the account holding the conversation's most
@@ -3085,7 +3238,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   assignment = priorityAssignments.get(sessionKey)
                   if (!assignment) {
                     const lastUsed = new Map<string, number>()
-                    for (const id of configuredOrder) {
+                    for (const id of configuredOrder.filter(id => !isAgyCandidate(id))) {
                       for (const sessionId of new Set([rootSessionId ?? adapterSessionId, adapterSessionId])) {
                         const mapped = lookupSharedSessionResult(mappingKeyOn(id, sessionId))
                         if (mapped.status === "error") {
@@ -3188,11 +3341,18 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                   ? [retainOnlyProfile]
                   : [first, ...order.filter(id => id !== first && !benched(id))]
               }
+              if (agyRequired) candidates = [AGY_ACCOUNT_ID]
+              const now = Date.now()
+              const openings = [agyReset, ...configuredOrder.filter(id => !isAgyCandidate(id)).flatMap(id => [
+                priorityExhaustion.until(id, modelFamily), reserveHolds.get(id)?.until,
+              ])].filter((value): value is number => typeof value === "number" && value > now)
               return dispatchPriority({
                 context: c,
                 body,
                 requestMeta,
                 candidateIds: candidates,
+                agy,
+                earliestReset: agy && openings.length ? Math.min(...openings) : undefined,
                 sessionKey,
                 wantsStream: body.stream === true,
                 currentProfileId: assignedProfile,
@@ -3208,6 +3368,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           }
         }
 
+        if (agyResults) return agyConflict()
         const profile = resolveProfile(
           finalConfig.profiles,
           finalConfig.defaultProfile,
@@ -3457,24 +3618,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         // `output_config.effort`. normalizeEffort gates the value to Claude's
         // vocabulary so an unknown level (e.g. OpenAI's "minimal") falls back to
         // the model default instead of erroring at the SDK boundary.
-        let effort = normalizeEffort(
-          effortHeader
-          || body.effort
-          || body.reasoning_effort
-          || body.output_config?.effort
-        )
-        if (!effort && Array.isArray(body.messages)) {
-          for (let i = body.messages.length - 1; i >= 0; i--) {
-            const m = body.messages[i]
-            if (m?.role === "system") {
-              const cfg = (m as any).output_config ?? (m as any).outputConfig
-              if (cfg?.effort) {
-                effort = normalizeEffort(cfg.effort)
-                if (effort) break
-              }
-            }
-          }
-        }
+        let effort = normalizeEffort(readClientEffort({ header: effortHeader, body }))
         let thinking: QueryContext['thinking'] | undefined = body.thinking || undefined
         if (thinkingHeader !== undefined) {
           try {
@@ -3609,7 +3753,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         const betas = betaFilter.forwarded
 
         // Session resume: look up cached Claude SDK session and classify mutation
-        const agentSessionId = adapter.getSessionId(c, body)
+        const agentSessionId = adapterSessionId
         // NOTE: agent-specific (opencode). A plugin-less OpenCode client cannot
         // have its internal title/summary agents told apart from the user's
         // conversation, and that exposure is otherwise silent — the startup
@@ -4117,8 +4261,8 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         ) {
           lineageResult = { type: "diverged", reason: "concurrent-race" }
         }
-        if (options.forceFreshPriorityReplay) {
-          if (!options.priorityPublication || !agentSessionId || !durableMappingKey) {
+        if (options.forceFreshPriorityReplay || combinedAgy) {
+          if (options.forceFreshPriorityReplay && (!options.priorityPublication || !agentSessionId || !durableMappingKey)) {
             throw new Error("Fresh priority replay requires trusted keyed durable publication")
           }
           // A cross-profile transition replays the complete request into a
@@ -9897,6 +10041,17 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     ...(chatGptProfiles?.profiles().map(p => p.id) ?? []),
   ]
 
+  function effectiveOrderForSettings(profileIds: string[]): string[] {
+    const configured = priorityProfileOrderSetting()
+    const order = resolvePriorityOrder(profileIds, configured).order
+    if (!antigravity || profileIds.includes(AGY_ACCOUNT_ID) || !configured?.includes(AGY_ACCOUNT_ID)) return order
+    const claudeIds = getEffectiveProfiles(finalConfig.profiles).map(profile => profile.id)
+    const anchor = configured.slice(configured.indexOf(AGY_ACCOUNT_ID) + 1).find(id => claudeIds.includes(id))
+    const index = anchor === undefined ? -1 : order.indexOf(anchor)
+    order.splice(index < 0 ? order.length : index, 0, AGY_ACCOUNT_ID)
+    return order
+  }
+
   // `activeProfile` keeps meaning the Claude pointer wherever Claude profiles
   // exist, so a Claude-only consumer reads what it always read; on an instance
   // with ChatGPT seats and no Claude profile it names the ChatGPT one.
@@ -10330,7 +10485,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     return c.json({
       routing: getRoutingMode(process.env.MERIDIAN_ROUTING ?? getSetting("routing")),
       modes: ROUTING_MODES,
-      profileOrder: resolvePriorityOrder(profileIds, priorityProfileOrderSetting()).order,
+      profileOrder: effectiveOrderForSettings(profileIds),
       profiles: profileIds,
       saved: {
         routing: getSetting("routing") ?? null,
@@ -10362,6 +10517,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         return c.json({ error: "profileOrder must be an array of profile ids" }, 400)
       }
       const known = new Set(orderableProfileIds())
+      if (antigravity) known.add(AGY_ACCOUNT_ID)
       const unknown = (body.profileOrder as string[]).filter(id => !known.has(id))
       if (unknown.length > 0) return c.json({ error: `Unknown profiles: ${unknown.join(", ")}` }, 400)
       setSetting("profileOrder", body.profileOrder as string[])
@@ -11095,7 +11251,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // (meridian home, pylon's switcher) can render the pool.
     const priorityInfo = isPoolRouting(routingModeNow)
       ? {
-          profileOrder: resolvePriorityOrder(orderableProfileIds(), priorityProfileOrderSetting()).order,
+          profileOrder: effectiveOrderForSettings(orderableProfileIds()),
           exhausted: [
             ...priorityExhaustion.snapshot(),
             ...chatGptExhaustion.snapshot().map(mark => ({ ...mark, id: chatGptProfiles?.profileIdFor(mark.id) ?? mark.id })),

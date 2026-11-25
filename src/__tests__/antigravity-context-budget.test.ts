@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { AntigravityRuntime } from "../proxy/backends/antigravityRuntime"
 import { createAntigravityServer } from "../proxy/backends/antigravity"
-import { blocks, parseAgRequest, type AgMessage } from "../proxy/backends/antigravityProtocol"
+import { blocks, parseAgRequest, renderAgPrompt, type AgMessage } from "../proxy/backends/antigravityProtocol"
 import { estimateAgTextTokens } from "../proxy/backends/antigravityTokens"
 import { DEFAULT_PROXY_CONFIG } from "../proxy/types"
 
@@ -14,7 +14,7 @@ const cleanup: (() => Promise<void>)[] = []
 const saved = { ...process.env }
 afterEach(async () => {
   for (const stop of cleanup.splice(0)) await stop()
-  for (const key of Object.keys(process.env)) if (key.startsWith("MERIDIAN_AGY_")) {
+  for (const key of new Set([...Object.keys(process.env), ...Object.keys(saved)])) if (key.startsWith("MERIDIAN_AGY_")) {
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
   }
@@ -48,7 +48,7 @@ async function fixture(priming?: string, persist = false, inlineToolSchemas = tr
   const send = (messages: AgMessage[], overrides: object = {}) => backend.app.fetch(new Request("http://local/v1/messages", {
     method: "POST", body: JSON.stringify({ model: "fixture-model", tools, max_tokens: 128, messages, ...overrides }),
   }))
-  const steps = async (): Promise<{ pid: number; prompt: string }[]> =>
+  const steps = async (): Promise<{ pid: number; prompt: string; agent?: string }[]> =>
     (await readFile(path, "utf8")).trim().split("\n").map(line => JSON.parse(line))
   return { send, steps, runtime }
 }
@@ -72,7 +72,7 @@ describe("Antigravity context budgeting", () => {
       expect(frame.prompt).toContain('"lookup"')
     }
   })
-  it("defaults to one bounded cold input with the newest request and intact tool pairs", async () => {
+  it("defaults to one bounded cold input with intact tool pairs when there is no system text", async () => {
     const { send, steps } = await fixture()
     const result = await send([text("EARLIEST"), ...historicalPairs(48, "\u6f22".repeat(1700)), assistant("Done"), text("SKIP_TOOLS CURRENT_TAIL")])
     expect(result.status).toBe(200)
@@ -120,7 +120,7 @@ describe("Antigravity context budgeting", () => {
     expect(unpack(frames[6]!.prompt)).toEqual([{ role: "user", content: [{ type: "text", text: "SKIP_TOOLS tiny continuation" }] }])
   })
 
-  it("only loads cold history in multiple steps when explicitly enabled", async () => {
+  it("allows opt-in multi-step cold replay without system text", async () => {
     process.env.MERIDIAN_AGY_CHUNKED_HISTORY = "1"
     const { send, steps, runtime } = await fixture()
     const result = await send([text("EARLIEST"), ...historicalPairs(12, "x".repeat(24000)), assistant("Done"), text("SKIP_TOOLS CURRENT_TAIL")])
@@ -140,6 +140,20 @@ describe("Antigravity context budgeting", () => {
     expect(runtime.requests[0]!.inputTokens).toBe(120 + 100 * (frames.length - 1))
   })
 
+  it("retains the complete newest request when the history step cap requires trimming", async () => {
+    process.env.MERIDIAN_AGY_HISTORY_MAX_STEPS = "1"
+    const { send, steps } = await fixture()
+    const newest = text("SKIP_TOOLS newest " + "n".repeat(40_000) + " intact tail")
+    const result = await send([text("EARLIEST"), ...historicalPairs(12, "x".repeat(24_000)), assistant("Done"), newest], { system: "Client instructions" })
+    expect(result.status).toBe(200)
+    const frames = await steps()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]?.agent).toEndWith("Client instructions\n")
+    const messages = unpack(frames[0]!.prompt)
+    expect(messages.at(-1)).toEqual({ ...newest, content: blocks(newest) })
+    expectPairs(messages)
+  })
+
   it("carries the current goal and the latest tool batch into the final input", async () => {
     process.env.MERIDIAN_AGY_CHUNKED_HISTORY = "1"
     const { send, steps } = await fixture("silent")
@@ -152,6 +166,89 @@ describe("Antigravity context budgeting", () => {
     expect(final[0]).toEqual({ role: "user", content: [{ type: "text", text: "CURRENT_GOAL" }] })
     expect(frames.at(-1)!.prompt).toContain("tool_11")
     expectPairs(final)
+  })
+
+  it("delivers large system text once as agent instructions so a large newest message fits unreduced", async () => {
+    process.env.MERIDIAN_AGY_CHUNKED_HISTORY = "1"
+    const { send, steps } = await fixture(undefined, false, false)
+    const system = "SYSTEM_HEAD " + "s".repeat(150_000) + " SYSTEM_TAIL"
+    const completion = "SKIP_TOOLS COMPLETION_HEAD " + "c".repeat(40_000) + " COMPLETION_TAIL"
+    const result = await send([text("EARLIEST"), ...historicalPairs(6, "x".repeat(24000)), assistant("Done"), text(completion)], { system })
+    expect(result.status).toBe(200)
+    const frames = await steps()
+    expect(frames).toHaveLength(2)
+    expect(new Set(frames.map(frame => frame.pid)).size).toBe(1)
+    for (const frame of frames) {
+      expect(Buffer.byteLength(frame.prompt)).toBeLessThanOrEqual(180000)
+      expect(frame.prompt).not.toContain("SYSTEM_HEAD")
+      expect(frame.agent).toEndWith("\n\n" + system + "\n")
+    }
+    expect(unpack(frames.at(-1)!.prompt)).toEqual([{ role: "user", content: [{ type: "text", text: completion }] }])
+  })
+
+  it("preserves a historical report verbatim in default cold replay after a system change", async () => {
+    delete process.env.MERIDIAN_AGY_CHUNKED_HISTORY
+    const { send, steps } = await fixture(undefined, false, false)
+    const prior = [text("SKIP_TOOLS gather evidence"), ...historicalPairs(6, "r".repeat(24_000)), text("Wait for the report")]
+    const first = await send(prior, { system: "Prior instructions" })
+    expect(first.status).toBe(200)
+    expect(await first.json()).toMatchObject({ content: [{ type: "text", text: "READY" }] })
+
+    const report = '<background-result kind="subagent" state="completed">\n' + "c".repeat(40_000) + "\n</background-result>"
+    const newest = text("SKIP_TOOLS reconcile the report with the six tool results")
+    const messages = [...prior, assistant("READY"), text(report), newest]
+    const system = "Updated instructions\n" + "s".repeat(149_000) + "\nLast instruction: résumé."
+    const result = await send(messages, { system })
+    expect(result.status).toBe(200)
+
+    const [previous, ...frames] = await steps()
+    const replay = frames.map(frame => unpack(frame.prompt))
+    const delivered = replay.flat()
+    expect(delivered.flatMap(blocks).some(block => block.type === "text" && block.text === report)).toBe(true)
+    expect(frames).toHaveLength(3)
+    expect(new Set(frames.map(frame => frame.pid)).size).toBe(1)
+    for (const frame of frames) {
+      expect(frame.pid).not.toBe(previous?.pid)
+      expect(Buffer.byteLength(frame.prompt)).toBeLessThanOrEqual(180_000)
+      expect(frame.agent).toEndWith("\n\n" + system + "\n")
+    }
+    for (const chunk of replay) expectPairs(chunk)
+    expect(replay.at(-1)).toEqual([{ ...newest, content: blocks(newest) }])
+    expect(delivered).toEqual(messages.map(message => ({ ...message, content: blocks(message) })))
+  })
+
+  it("keeps under-limit requests unreduced and unchanged without system text", async () => {
+    const { send, steps } = await fixture(undefined, false, false)
+    const messages: AgMessage[] = [{ role: "user", content: [{ type: "text", text: "SKIP_TOOLS small request" }] }]
+    expect((await send(messages)).status).toBe(200)
+    const system = [{ type: "text", text: "SHORT_SYSTEM" }, { type: "text", text: "SECOND_BLOCK" }]
+    expect((await send(messages, { system })).status).toBe(200)
+    const [plain, instructed] = await steps()
+    expect(plain?.agent).toBeUndefined()
+    expect(plain?.prompt).toBe(renderAgPrompt(parseAgRequest({ model: "fixture-model", tools, max_tokens: 128, messages }), [], false, false))
+    expect(instructed?.prompt).not.toContain("SHORT_SYSTEM")
+    expect(instructed?.agent).toEndWith("\n\nSHORT_SYSTEM\nSECOND_BLOCK\n")
+    expect(instructed && unpack(instructed.prompt)).toEqual(messages)
+  })
+
+  it("fails before sending input when agy selects a different agent", async () => {
+    const { send, steps, runtime } = await fixture()
+    runtime.childEnv.AGY_FIXTURE_SELECTED_AGENT = "default"
+    const result = await send([text("SKIP_TOOLS")], { system: "Required instructions" })
+    expect(result.status).toBe(502)
+    expect(await resultMessage(result)).toContain("did not select the Meridian client agent")
+    await expect(steps()).rejects.toThrow("ENOENT")
+  })
+
+  it("fits the newest request within the context left after loading agent instructions", async () => {
+    process.env.MERIDIAN_AGY_MAX_CONTEXT_TOKENS = "13000"
+    const { send, steps } = await fixture()
+    const system = "s".repeat(40_000)
+    const newest = text("SKIP_TOOLS current")
+    expect((await send([text("o".repeat(15_000)), assistant("finished"), newest], { system })).status).toBe(200)
+    const [frame] = await steps()
+    expect(frame && unpack(frame.prompt).at(-1)).toEqual({ role: "user", content: [{ type: "text", text: "SKIP_TOOLS current" }] })
+    expect(estimateAgTextTokens((frame?.prompt ?? "") + system) + 32 + 128).toBeLessThanOrEqual(13_000)
   })
 
   for (const mode of ["rpc", "tool-frame", "no-marker"] as const) {

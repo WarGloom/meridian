@@ -3,6 +3,8 @@
 const { spawnSync } = require('node:child_process')
 const { readFileSync, appendFileSync } = require('node:fs')
 const args = process.argv.slice(2)
+const agentName = args.includes('--agent') ? args[args.indexOf('--agent') + 1] : undefined
+let agent
 let contextFrameIndex
 const emit = value => {
   if (contextFrameIndex !== undefined && value.step_update) {
@@ -13,7 +15,7 @@ const emit = value => {
 const nativePrompts = []
 async function main(inputPrompt) {
   if (args[0] === '--version') return console.log(process.env.AGY_FIXTURE_VERSION || '1.5.13')
-  if (args[0] === 'models') return console.log('fixture-model\tFixture Model\nfixture-model-high\tFixture High\ngemini-fixture-low\tGemini Low\ngemini-fixture-medium\tGemini Medium\ngemini-fixture-high\tGemini High')
+  if (args[0] === 'models') return console.log('fixture-model\tFixture Model\nfixture-model-high\tFixture High\ngemini-fixture-low\tGemini Low\ngemini-fixture-medium\tGemini Medium\ngemini-fixture-high\tGemini High\nclaude-sonnet-5-5-high\tClaude Sonnet High\nclaude-sonnet-5-5-low\tClaude Sonnet Low')
   let prompt = args[args.indexOf('-p') + 1]
   if (inputPrompt !== undefined) prompt = inputPrompt
   nativePrompts.push(prompt)
@@ -22,7 +24,7 @@ async function main(inputPrompt) {
     if (process.env.AGY_FIXTURE_CONTEXT_PRIMING !== 'no-marker') {
       emit({ event: 'step_update', step_update: { step_type: 'user_input', step_index: contextFrameIndex } })
     }
-    appendFileSync(process.env.AGY_FIXTURE_CONTEXT_LOG, JSON.stringify({ pid: process.pid, prompt }) + '\n')
+    appendFileSync(process.env.AGY_FIXTURE_CONTEXT_LOG, JSON.stringify({ pid: process.pid, prompt, agent }) + '\n')
     if (prompt.startsWith('History loading step.')) {
       const result = spawnSync(process.execPath, ['policy.cjs'], {
         input: JSON.stringify({ toolCall: { name: 'call_mcp_tool', args: { ServerName: 'meridian_client', ToolName: 'lookup' } } }),
@@ -81,7 +83,19 @@ async function main(inputPrompt) {
     }
   }
   if (prompt.includes('EFFORT_PROBE') && args[args.indexOf('--effort') + 1] !== 'high') throw new Error('Native effort flag missing')
-  emit({ event: 'init' })
+  if (args.includes('--model') && args[args.indexOf('--model') + 1].startsWith('claude-') && args.includes('--effort')) throw new Error('Claude variant received the unsupported effort flag')
+  if (!agentName) emit({ event: 'init' })
+  if (prompt.includes('COALESCED_QUOTA')) {
+    return process.stdout.write([
+      { event: 'step_update', step_update: { state: 'DONE', usage: { input_tokens: 1 } } },
+      { event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Buffered output' } },
+      { event: 'result', result: { status: 'ERROR', error: 'Quota exhausted; retry in 45 seconds' } },
+    ].map(frame => JSON.stringify(frame) + '\n').join(''))
+  }
+  if (prompt.includes('PARTIAL_QUOTA')) {
+    emit({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'PARTIAL_TEXT' } })
+    return emit({ event: 'result', result: { status: 'ERROR', error: 'Quota exhausted; retry in 45 seconds' } })
+  }
   if (prompt.includes('RATE_LIMIT')) return emit({event:'result',result:{status:'ERROR',error:'Quota exhausted; retry in 45 seconds'}})
   if (prompt.includes('HANG')) { setInterval(() => {}, 1000); return }
   if (prompt.includes('MALFORMED')) { console.log('not JSON'); return }
@@ -228,6 +242,10 @@ async function main(inputPrompt) {
 }
 async function run() {
   if (!args.includes('--input-format')) return main()
+  if (agentName) {
+    agent = readFileSync(`.agents/agents/${agentName}.md`, 'utf8')
+    emit({ event: 'init', init: { agent: process.env.AGY_FIXTURE_SELECTED_AGENT ?? agentName } })
+  }
   const lines = require('node:readline').createInterface({ input: process.stdin })
   for await (const line of lines) await main(JSON.parse(line).message.content)
 }

@@ -1,6 +1,7 @@
 import { AgCompletedAnswers, agRequestId, replayAgAnswer } from "./antigravityReplay"
 import { AgResponseJobs, agEventStream, responseEvents } from "./antigravityJobs"
 import { estimateAgTokens } from "./antigravityTokens"
+import { isAgyClaudeModel, selectAgyClaudeModel, type AgyClaudeModelSlug } from "../effort"
 import { agOpenai } from "./antigravityOpenai"
 import { AgResponseStore, agResponseScope } from "./antigravityResponses"
 import { AgTextStops } from "./antigravityStops"
@@ -16,7 +17,9 @@ import { hasValidApiKey } from "../auth"
 import { headerSettingsResponse, healthHostname } from "../../headerSettings"
 import { AntigravityRuntime, type AntigravityRun } from "./antigravityRuntime"
 import { AgStepBudgetError, type AgStepObserver } from "./antigravityStepBudget"
-import { AntigravityError, forcedAgTool, toolChoiceInstruction, blocks, latestTypedRequest, contractKey, historyKey, sameAgExecutionContract, parseAgRequestWithMeta, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
+import { AntigravityError, AgPoolFailure, forcedAgTool, toolChoiceInstruction, blocks, latestTypedRequest, contractKey, historyKey, sameAgExecutionContract, parseAgRequestWithMeta, type AgBlock, type AgResult, type AgRequest } from "./antigravityProtocol"
+
+const POOL_SESSION_PREFIX = "@meridian/claude-pool/"
 
 function droppedToolHeaders(names: string[]): Record<string, string> {
   if (!names.length) return {}
@@ -47,12 +50,35 @@ async function readBody(request: Request): Promise<unknown> {
   } finally { reader.releaseLock() }
 }
 
-export function createAntigravityServer(config: ProxyConfig, runtime = new AntigravityRuntime({ ...config.antigravity, maxConcurrent: config.antigravity?.maxConcurrent ?? config.maxConcurrent })): ProxyServer & { closeBackend(): Promise<void>; providerStatus(): Promise<ProviderUsage> } {
+export type AgPoolLifecycle = {
+  readonly expose: () => void
+  readonly commit: () => Promise<void>
+  readonly finalize: () => Promise<void>
+  readonly quota: (retryAfter: number | undefined) => void
+  readonly unavailable: (retryAfter: number | undefined) => void
+  readonly completion: (response: Response, done: Promise<void>) => void
+}
+
+export type AgPoolRequest = {
+  readonly body: Readonly<Record<string, unknown>>
+  readonly effort: unknown
+  readonly retainedSlug?: AgyClaudeModelSlug
+  readonly sessionKey: string
+  readonly signal: AbortSignal
+  readonly requireToolWitness: boolean
+  readonly replayOnly: boolean
+  readonly forceFresh: boolean
+}
+
+export function createAntigravityServer(config: ProxyConfig, runtime = new AntigravityRuntime({ ...config.antigravity, maxConcurrent: config.antigravity?.maxConcurrent ?? config.maxConcurrent })): ProxyServer & {
+  closeBackend(): Promise<void>; providerStatus(): Promise<ProviderUsage>
+  preparePool?(input: AgPoolRequest): Promise<{ readonly slug: AgyClaudeModelSlug; run(lifecycle: AgPoolLifecycle): Promise<Response> } | undefined>
+} {
   if (config.profiles?.length || config.defaultProfile) throw new Error("Antigravity does not support Claude profile configuration")
   const responses = new AgResponseStore(undefined, undefined, runtime.state)
   const completedAnswers = new AgCompletedAnswers(runtime.state)
   const responseJobs = new AgResponseJobs(responses)
-  async function recoverResults(body: AgRequest, signal: AbortSignal, results: AgResult[], observe: AgStepObserver, previous?: AntigravityRun, reason: "client-context-replay" | "history-replay" = "client-context-replay"): Promise<AntigravityRun> {
+  async function recoverResults(body: AgRequest, signal: AbortSignal, results: AgResult[], observe: AgStepObserver, previous?: AntigravityRun, reason: "client-context-replay" | "history-replay" = "client-context-replay", forceFresh = false): Promise<AntigravityRun> {
     // Claim before retiring the old owner: simultaneous HTTP retries must not
     // start competing replays while shutdown or account preflight is pending.
     const claimed = new Set([...results.map(result => result.tool_use_id), ...(previous?.delivered.map(call => call.id) ?? [])])
@@ -64,7 +90,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         await previous.settled
       }
       if (signal.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
-      const run = await runtime.create(body, signal, observe)
+      const run = await runtime.create(body, signal, observe, forceFresh)
       if (previous) run.continuation = reason
       runtime.forgetInterruptedContinuation(body)
       for (const result of results) runtime.rememberConsumedTool(result.tool_use_id)
@@ -74,7 +100,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       for (const id of claimed) runtime.recoveringTools.delete(id)
     }
   }
-  async function selectRun(body: AgRequest, signal: AbortSignal, observe: AgStepObserver): Promise<AntigravityRun> {
+  async function selectRun(body: AgRequest, signal: AbortSignal, observe: AgStepObserver, forceFresh = false): Promise<AntigravityRun> {
     await runtime.waitForInterruptedContinuation(body)
     // Clients may append steering as text in the result message or as another
     // user message. Match the delivered assistant prefix before accepting either.
@@ -82,14 +108,17 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
     const suffix = body.messages.slice(suffixStart)
     const results = suffix.flatMap(blocks).filter(b => b.type === "tool_result")
     const owners = results.map(result => runtime.toolOwners.get(result.tool_use_id)).filter(run => run !== undefined)
-    // An explicitly appended user turn may replay completed context. Duplicate
-    // protection applies to result continuations, not unrelated new user input.
-    const continuationResults = owners.length || blocks(body.messages.at(-1)!).some(block => block.type === "tool_result") ? results : []
+    // A verified pooled batch is a continuation across the whole suffix.
+    // Standalone requests still allow a new user turn over completed context.
+    const continuationResults = body.meridian_session_key?.startsWith(POOL_SESSION_PREFIX) || owners.length
+      || blocks(body.messages.at(-1)!).some(block => block.type === "tool_result") ? results : []
     if (continuationResults.some(result => runtime.recoveringTools.has(result.tool_use_id)) || (continuationResults.some(result => runtime.hasConsumedTool(result.tool_use_id)) && !runtime.canRetryContinuation(body))) throw new AntigravityError("Antigravity tool result was already consumed; append the subsequent assistant response before continuing", 409)
     // A validated complete history is also a stateless recovery request. Only
     // correlate against live processes; never re-execute a tool on the client's behalf.
     if (owners.length) {
       const run = owners[0]!
+      if (forceFresh || owners.some(owner => Boolean(owner.request.meridian_session_key?.startsWith(POOL_SESSION_PREFIX))
+        !== Boolean(body.meridian_session_key?.startsWith(POOL_SESSION_PREFIX)))) throw new AntigravityError("Antigravity tool belongs to another execution route", 409)
       if (run.busy) throw new AntigravityError("Antigravity turn already has an active response", 409)
       if (results.length !== run.delivered.length || results.some(result => !run.delivered.some(call => call.id === result.tool_use_id)) || owners.some(owner => owner !== run) || historyKey(run.history) !== historyKey(body.messages.slice(0, suffixStart))) {
         if (owners.some(owner => owner !== run) || !sameAgExecutionContract(run.request, body) || runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents) {
@@ -122,25 +151,30 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       }
       return run
     }
-    return recoverResults(body, signal, continuationResults, observe)
+    return recoverResults(body, signal, continuationResults, observe, undefined, "client-context-replay", forceFresh)
   }
 
-  async function messages(request: Request, saveCompletedAnswers = true): Promise<Response> {
+  async function messages(request: Request, saveCompletedAnswers = true, pool?: {
+    readonly body: AgRequest; readonly model: string; readonly witness: boolean; readonly lifecycle: AgPoolLifecycle
+    readonly replayOnly: boolean; readonly forceFresh: boolean
+  }): Promise<Response> {
     if (runtime.draining) throw new AntigravityError("Antigravity is shutting down", 503, "api_error")
     if (request.headers.has("x-meridian-profile")) throw new AntigravityError("Antigravity uses the current agy account; Claude profile routing is unavailable")
-    const { request: body, droppedTools } = parseAgRequestWithMeta(await runtime.plugins.request(await readBody(request), request.signal), runtime.options.adaptThinkingBudgets)
+    const { request: body, droppedTools } = pool ? { request: pool.body, droppedTools: [] }
+      : parseAgRequestWithMeta(await runtime.plugins.request(await readBody(request), request.signal), runtime.options.adaptThinkingBudgets)
+    if (!pool && body.meridian_session_key?.startsWith(POOL_SESSION_PREFIX)) throw new AntigravityError("Reserved Antigravity session namespace")
     if (request.signal.aborted) throw new AntigravityError("Request cancelled", 499, "api_error")
     const adaptationHeaders: Record<string, string> = {
-      ...(runtime.options.adaptThinkingBudgets ? {
+      ...(!pool && runtime.options.adaptThinkingBudgets ? {
         "x-meridian-thinking-budgets": "approximate-effort",
         "x-meridian-effective-model": body.model,
         ...(body.output_config?.effort ? { "x-meridian-effective-effort": body.output_config.effort } : {}),
       } : {}),
       ...droppedToolHeaders(droppedTools),
     }
-    const scope = agResponseScope(request.headers)
+    const scope = pool ? "pool:" + body.meridian_session_key : agResponseScope(request.headers)
     const canSaveAnswer = saveCompletedAnswers && !runtime.options.allowNativeBrowser && !runtime.options.allowNativeSubagents
-    const requestId = saveCompletedAnswers ? agRequestId(body, request.headers) : undefined
+    const requestId = pool ? runtime.state && completedAnswers.poolRequestId(body) : saveCompletedAnswers ? agRequestId(body, request.headers) : undefined
     const replayOnly = request.headers.get("x-meridian-replay-only")
     if (replayOnly !== null && (replayOnly !== "true" || !requestId || !canSaveAnswer)) throw new AntigravityError("Cache-only recovery requires an identified Anthropic request with native grants disabled")
     if (requestId && !canSaveAnswer) throw new AntigravityError("Identified retries require native browser/subagent grants to be disabled")
@@ -151,8 +185,14 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
     if (saved) {
       const calls = saved.content.filter(block => block.type === "tool_use")
       if (calls.some(call => runtime.hasConsumedTool(call.id) || runtime.recoveringTools.has(call.id) || runtime.toolOwners.get(call.id)?.busy)) throw new AntigravityError("Saved tool calls are already being answered or consumed; continue with their results", 409)
+      if (pool) {
+        await pool.lifecycle.commit()
+        await pool.lifecycle.finalize()
+      }
       return replayAgAnswer(saved, body.stream === true, adaptationHeaders)
     }
+    if (pool?.witness && !completedAnswers.hasPoolToolWitness(body, scope)) throw new AntigravityError("Antigravity tool delivery proof is missing or expired", 409)
+    if (pool?.replayOnly) throw new AntigravityError("Antigravity response proof is missing or expired", 409)
     if (replayOnly) throw new AntigravityError("No saved response is available for this request", 404, "not_found_error")
     const release = completedAnswers.claim(body, scope, requestId)
     let run: AntigravityRun
@@ -171,7 +211,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
           if (bytes > runtime.promptBytes) throw new AgStepBudgetError(bytes, "Antigravity user message is " + bytes + " bytes; the limit is " + runtime.promptBytes + " bytes")
         }
       }
-      run = await selectRun(body, request.signal, observe)
+      run = await selectRun(body, request.signal, observe, pool?.forceFresh)
     } catch (error) {
       if (error instanceof AgStepBudgetError) { rejected = 1; beforeBytes += error.bytes }
       release()
@@ -194,7 +234,15 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
       let emittedTool = false
       let reason: "end_turn" | "tool_use" | "stop_sequence" = "end_turn"
       const stops = new AgTextStops(body.stop_sequences ?? [])
-      const base = { id, type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { ...usage } }
+      const base = { id, type: "message", role: "assistant", model: pool?.model ?? body.model, content: [], stop_reason: null, stop_sequence: null, usage: { ...usage } }
+      let outputCommitted = false
+      async function commitOutput() {
+        if (outputCommitted) return
+        await pool?.lifecycle.commit()
+        outputCommitted = true
+        if (emit) pool?.lifecycle.expose()
+        emit?.("message_start", { type: "message_start", message: base })
+      }
       function emitText(text: string) {
         if (!textOpen) {
           content.push({ type: "text", text: "" }); textOpen = true
@@ -204,13 +252,18 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         if (tail?.type === "text") tail.text += text
         emit?.("content_block_delta", { type: "content_block_delta", index: content.length - 1, delta: { type: "text_delta", text: text } })
       }
-      emit?.("message_start", { type: "message_start", message: base })
+      if (!pool) emit?.("message_start", { type: "message_start", message: base })
       try {
         while (true) {
           const event = await run.queue.next()
-          if (event.kind === "error") throw event.error
+          if (run.queue.hasOutput) pool?.lifecycle.expose()
+          if (event.kind === "error") {
+            if (pool && event.error instanceof AgPoolFailure && event.error.kind === "provider_quota") pool.lifecycle.quota(event.error.retryAfter)
+            throw event.error
+          }
           if (event.kind === "usage") { usage.input_tokens += event.input; usage.output_tokens += event.output; usage.cache_read_input_tokens += event.cache; continue }
           if (event.kind === "text") {
+            if (pool) await commitOutput()
             if (forcedAgTool(body)) continue
             if (body.output_config?.format && body.stop_sequences?.some(stop => event.text.includes(stop))) throw new AntigravityError("A stop sequence occurs inside the structured result; truncation would violate the requested JSON schema", 422)
             const text = stops.push(event.text)
@@ -239,6 +292,10 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
               const output = content.filter(block => block.type === "text" || block.type === "tool_use")
               completedAnswers.put(body, scope, { ...base, content: output, stop_reason: reason, stop_sequence: null, usage }, requestId)
             }
+            if (pool) {
+              await commitOutput()
+              await pool.lifecycle.finalize()
+            }
             for (const [offset, call] of calls.entries()) {
             const index = firstIndex + offset
             emit?.("content_block_start", { type: "content_block_start", index, content_block: { ...call, input: {} } })
@@ -254,10 +311,16 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         const answer = { ...base, content, stop_reason: reason, stop_sequence: stops.matched ?? null, usage }
         const textContent = content.filter(block => block.type === "text")
         if (canSaveAnswer && !emittedTool && textContent.length === content.length) completedAnswers.put(body, scope, { ...answer, content: textContent }, requestId)
+        if (pool && !emittedTool) {
+          await commitOutput()
+          await pool.lifecycle.finalize()
+        }
         emit?.("message_delta", { type: "message_delta", delta: { stop_reason: reason, stop_sequence: stops.matched ?? null }, usage })
         emit?.("message_stop", { type: "message_stop" })
+        run.queue.finishResponse()
         return answer
       } catch (error) {
+        if (run.queue.hasOutput) pool?.lifecycle.expose()
         status = error instanceof AntigravityError ? error.status : 502
         failure = error instanceof Error ? error.message : String(error)
         run.abort(error instanceof Error ? error : new Error(String(error)))
@@ -281,13 +344,14 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
           completed = true
           run.busy = false
           request.signal.removeEventListener("abort", cancel)
-          if (requestId && (status !== 200 || cancelledDuringResponse)) await run.settled
+          if ((requestId || pool) && (status !== 200 || cancelledDuringResponse)) await run.settled
           release()
         }
       }
     }
     if (!body.stream) return Response.json(await consume(), { headers: adaptationHeaders })
     let cancelled = false
+    let done: Promise<void> | undefined
     const encoder = new TextEncoder()
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -308,13 +372,63 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
         }
         const heartbeat = setInterval(() => { try { emit("ping", { type: "ping" }) } catch (error) { run.abort(error instanceof Error ? error : new Error(String(error))) } }, 10000)
         heartbeat.unref()
-        void consume(emit).catch(error => {
+        done = consume(emit).then(() => undefined).catch(error => {
           emit("error", { type: "error", error: { type: error instanceof AntigravityError ? error.type : "api_error", message: String(error instanceof Error ? error.message : error), retry_after: error instanceof AntigravityError ? error.retryAfter : undefined } })
         }).finally(() => { clearInterval(heartbeat); if (!cancelled) controller.close() })
       },
       cancel() { cancelled = true; cancel() },
     }, { highWaterMark: 1024 * 1024, size: chunk => chunk?.byteLength ?? 0 })
-    return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", ...adaptationHeaders } })
+    const response = new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", ...adaptationHeaders } })
+    if (done) pool?.lifecycle.completion(response, done)
+    return response
+  }
+
+  async function preparePool(input: AgPoolRequest) {
+    const { body, effort, retainedSlug, sessionKey, signal, requireToolWitness } = input
+    if (runtime.options.allowNativeBrowser || runtime.options.allowNativeSubagents || !isAgyClaudeModel(body.model)) return
+    if (body.task_budget !== undefined || body.betas !== undefined) return
+    if (body.thinking !== undefined && (typeof body.thinking !== "object" || body.thinking === null
+      || !("type" in body.thinking) || body.thinking.type !== "adaptive" || "budget_tokens" in body.thinking)) return
+    if (signal.aborted) return
+    let catalog: readonly string[]
+    try {
+      await runtime.verifyAccount()
+      catalog = await runtime.availableModels()
+    } catch (error) {
+      if (error instanceof Error) return
+      throw error
+    }
+    const inherited = retainedSlug?.slice(retainedSlug.lastIndexOf("-") + 1)
+    const slug = selectAgyClaudeModel(body.model, effort === undefined ? inherited : effort, catalog)
+    if (!slug || (requireToolWitness && slug !== retainedSlug) || signal.aborted) return
+    const { output_config: output, ...payload } = body
+    const copy = { ...payload, model: slug, meridian_session_key: POOL_SESSION_PREFIX + sessionKey }
+    if (output !== undefined) {
+      if (typeof output !== "object" || output === null || Array.isArray(output)) return
+      const rest = Object.fromEntries(Object.entries(output).filter(([key]) => key !== "effort"))
+      if (Object.keys(rest).length) Object.assign(copy, { output_config: rest })
+    }
+    let parsed: AgRequest
+    try {
+      const result = parseAgRequestWithMeta(copy)
+      if (result.droppedTools.length) return
+      parsed = result.request
+    } catch (error) {
+      if (error instanceof AntigravityError) return
+      throw error
+    }
+    if ((requireToolWitness || (parsed.tools.length && parsed.tool_choice?.type !== "none")) && (!runtime.state || !runtime.options.allowToolBridge)) return
+    const model = body.model
+    return { slug, async run(lifecycle: AgPoolLifecycle) {
+      try {
+        return await messages(new Request("http://internal/v1/messages", { signal }), true, {
+          body: parsed, model, witness: requireToolWitness, lifecycle, replayOnly: input.replayOnly, forceFresh: input.forceFresh,
+        })
+      } catch (error) {
+        if (error instanceof AgPoolFailure && error.kind !== "provider_quota") lifecycle.unavailable(error.retryAfter)
+        return errorResponse(error)
+      }
+    } }
   }
 
   async function providerStatus(): Promise<ProviderUsage> {
@@ -424,7 +538,7 @@ export function createAntigravityServer(config: ProxyConfig, runtime = new Antig
     return Response.json({ ...payload, ...healthHostname() }, { status: response.status, headers })
   }
   return {
-    app: { fetch }, config, providerStatus,
+    app: { fetch }, config, providerStatus, preparePool,
     initPlugins: () => runtime.initialize(),
     beginDrain: () => { runtime.draining = true },
     forceAbortInFlight: () => { for (const run of runtime.runs.values()) run.abort(new Error("Backend shutting down")) },

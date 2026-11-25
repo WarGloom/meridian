@@ -14,6 +14,8 @@ import type { AddressInfo } from "node:net"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { z } from "zod"
 import { fetchOAuthUsage, fetchOAuthUsageResult, peekOAuthUsage, resetOAuthUsageCache } from "../proxy/oauthUsage"
 import { installSdkMock } from "./sdkMock"
 import { createOwnedCredentialStore } from "./modelsMock"
@@ -25,6 +27,8 @@ import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript"
 import { requestOptions } from "../../plugin/pi/headers"
 import type { PriorityFailbackPolicy } from "../proxy/routing"
 import type { DurablePriorityAssignment } from "../proxy/sessionStore"
+import { AntigravityRuntime } from "../proxy/backends/antigravityRuntime"
+import { AgPoolFailure } from "../proxy/backends/antigravityProtocol"
 
 type CapturedSdkCall = {
   readonly dir: string
@@ -71,6 +75,7 @@ function createStreamCompletionGate(phase: number): StreamCompletionGate {
 
 let capturedEnvs: string[] = []
 let capturedSdkCalls: CapturedSdkCall[] = []
+let capturedReplayPrompt: string[] | undefined
 let capturePhase = 0
 let failingDirs = new Set<string>()
 // Accounts that refuse only one model: dir fragment -> SDK model substring.
@@ -132,6 +137,10 @@ installSdkMock(() => ({
       ? { ...message, session_id: returnedSessionId }
       : message
     return (async function* () {
+      if (capturedReplayPrompt) {
+        if (typeof params.prompt === "string") capturedReplayPrompt.push(params.prompt)
+        else for await (const item of params.prompt) capturedReplayPrompt.push(JSON.stringify(item))
+      }
       const gate = promotionConcurrencyGate
       const tracksPromotion = gate !== null && gate.phase === phase
       if (tracksPromotion) {
@@ -411,6 +420,8 @@ type PostMessagesOptions = {
   readonly signal?: AbortSignal
   readonly tools?: readonly Record<string, unknown>[]
   readonly model?: string
+  readonly thinking?: { readonly type: "adaptive" | "enabled"; readonly budget_tokens?: number }
+  readonly effort?: string
 }
 
 async function postMessages(app: TestApp, options: PostMessagesOptions): Promise<Response> {
@@ -425,6 +436,8 @@ async function postMessages(app: TestApp, options: PostMessagesOptions): Promise
       stream: options.stream,
       messages,
       ...(options.tools ? { tools: options.tools } : {}),
+      ...(options.thinking ? { thinking: options.thinking } : {}),
+      ...(options.effort ? { output_config: { effort: options.effort } } : {}),
     }),
     ...(options.signal ? { signal: options.signal } : {}),
   }))
@@ -433,6 +446,12 @@ async function postMessages(app: TestApp, options: PostMessagesOptions): Promise
 async function post(app: TestApp, headers: Record<string, string> = {}, content: string | readonly TestMessage[] = "hello"): Promise<Response> {
   return postMessages(app, { headers, content, stream: false })
 }
+
+it("rejects the agy assignment namespace as a raw Claude session key", async () => {
+  const response = await post(createTestApp(), { "x-opencode-session": "@meridian/agy-owner/v1/raw-session-key" })
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error" } })
+})
 
 async function postStream(app: TestApp, options: Omit<PostMessagesOptions, "stream">): Promise<Response> {
   return postMessages(app, { ...options, stream: true })
@@ -592,6 +611,220 @@ describe("priority routing", () => {
     expect(res.headers.get("x-claude-session-id")).not.toBeNull()
     expect(capturedEnvs).toHaveLength(1)
     expect(capturedEnvs[0]).toContain("prof-work")
+  })
+
+  it("falls through the Claude pool to agy and recovers its first tool batch after restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meridian-combined-priority-"))
+    const open = () => createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)), statePath: join(dir, "agy.sqlite"), allowToolBridge: true } })
+    process.env.MERIDIAN_PROFILE_ORDER = "work,personal,agy-account"
+    failureMessage = SUBSCRIPTION_REFUSAL
+    failingDirs.add("prof-work")
+    failingDirs.add("prof-personal")
+    const session = "ses_agy_pool_recovery"
+    const headers = trustedOpenCodeTurnHeaders(session, "agy-first")
+    const tools = [{ name: "lookup", input_schema: { type: "object" } }]
+    const model = "claude-sonnet-5-5"
+    let server = open()
+    try {
+      const first = await postMessages(server.app, { headers, model, effort: "low", thinking: { type: "adaptive" }, tools, stream: false, content: "get receipt" })
+      const rawReply = await first.json()
+      expect(first.status, JSON.stringify(rawReply)).toBe(200)
+      const reply = z.object({ model: z.string(), stop_reason: z.string(), content: z.array(z.object({
+        type: z.literal("tool_use"), id: z.string(), name: z.string(), input: z.record(z.string(), z.unknown()),
+      })).min(1) }).parse(rawReply)
+      expect(reply).toMatchObject({ model, stop_reason: "tool_use", content: [{ type: "tool_use", name: "lookup" }] })
+      expect(durableRoute(session)).toMatchObject({ profileId: "agy-account" })
+      const firstCall = reply.content[0]
+      if (!firstCall) throw new Error("Expected a delivered tool call")
+      const id = firstCall.id
+      await server.closeBackend?.()
+      server = open()
+      const content = [{ role: "user", content: "get receipt" }, { role: "assistant", content: reply.content },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "receipt from the client" }] }] as const
+      capturedSdkCalls = []
+      const forged = [content[0], { role: "assistant", content: [{ ...firstCall, input: { key: "not the delivered call" } }] }, content[2]] as const
+      const conflict = await postMessages(server.app, { headers, model, thinking: { type: "adaptive" }, tools, stream: false, content: forged })
+      expect(conflict.status).toBe(409)
+      const response = await postMessages(server.app, { headers, model, thinking: { type: "adaptive" }, tools, stream: true, content })
+      const stream = await response.text()
+      expect(stream).toContain("receipt from the client")
+      expect(stream).toContain("event: message_stop")
+      expect(stream).not.toContain('"type":"tool_use"')
+      expect(capturedSdkCalls).toEqual([])
+      await server.closeBackend?.()
+      server = open()
+      const create = spyOn(AntigravityRuntime.prototype, "create")
+      try {
+        const altered = await postMessages(server.app, { headers, model, thinking: { type: "adaptive" }, tools, stream: false,
+          content: [...content, { role: "user", content: "Change direction after these same results" }] })
+        expect(altered.status).toBe(409)
+        expect(await altered.text()).toContain("already consumed")
+        expect(create).not.toHaveBeenCalled()
+      } finally { create.mockRestore() }
+      expect(capturedSdkCalls).toEqual([])
+    } finally {
+      await server.closeBackend?.()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("switches from an agy refusal before any SSE content to the next Claude candidate", async () => {
+    process.env.MERIDIAN_PROFILE_ORDER = "agy-account,work,personal"
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    try {
+      const session = "ses_agy_pool_quota"
+      const response = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders(session, "agy-quota"), model: "claude-sonnet-5-5",
+        stream: true, content: "RATE_LIMIT" })
+      const body = await response.text()
+      expect(body).toContain("event: message_stop")
+      expect(body).not.toContain("Quota exhausted")
+      expect(body).not.toContain("msg_agy_")
+      expect(durableRoute(session)).toMatchObject({ profileId: "work" })
+    } finally { await server.closeBackend?.() }
+  })
+
+  it.each([false, true])("does not fail over agy after partial output (stream=%s)", async stream => {
+    process.env.MERIDIAN_PROFILE_ORDER = "agy-account,work,personal"
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    try {
+      const headers = trustedOpenCodeTurnHeaders("ses_agy_partial", "agy-partial")
+      const response = await postMessages(server.app, { headers, model: "claude-sonnet-5-5", stream, content: "PARTIAL_QUOTA" })
+      const text = await response.text()
+      expect(text).toContain("Quota exhausted")
+      if (stream) expect(text).toContain("PARTIAL_TEXT")
+      expect(capturedSdkCalls).toEqual([])
+    } finally { await server.closeBackend?.() }
+  })
+
+  it.each([false, true])("does not fail over after coalesced agy output and refusal (stream=%s)", async stream => {
+    process.env.MERIDIAN_PROFILE_ORDER = "agy-account,work,personal"
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    try {
+      const headers = trustedOpenCodeTurnHeaders("ses_agy_coalesced", "agy-partial")
+      const response = await postMessages(server.app, { headers, model: "claude-sonnet-5-5", stream, content: "COALESCED_QUOTA" })
+      expect(await response.text()).toContain("Quota exhausted")
+      expect(capturedSdkCalls).toEqual([])
+      expect(lookupPriorityAssignmentResult("opencode:ses_agy_coalesced")).toMatchObject({ attempt: { blocked: true } })
+    } finally { await server.closeBackend?.() }
+  })
+
+  it.each(["cancelled", "unknown commit"])("settles cached agy staging after %s", async outcome => {
+    process.env.MERIDIAN_PROFILE_ORDER = "agy-account,work,personal"
+    const directory = mkdtempSync(join(tmpdir(), "meridian-agy-stage-cancel-"))
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)), statePath: join(directory, "agy.sqlite") } })
+    try {
+      const session = "agy-stage-cancel"
+      const request = { headers: trustedOpenCodeTurnHeaders(session, "agy-original"), model: "claude-sonnet-5-5", stream: false, content: "SKIP_TOOLS cached answer" }
+      const first = await postMessages(server.app, request)
+      expect(first.status).toBe(200)
+      const firstAnswer: unknown = await first.json()
+      const previous = durableRoute(session)
+      expect(previous.profileId).toBe("agy-account")
+      const store = await import("../proxy/sessionStore")
+      const stage = store.storeAgyPriorityAssignment
+      const controller = new AbortController()
+      const failAfterWrite = spyOn(store, "storeAgyPriorityAssignment").mockImplementation(async input => {
+        const staged = await stage(input)
+        if (!staged) throw new Error("Expected the new owner to be staged")
+        if (outcome === "unknown commit") throw new Error("Publication commit outcome unknown")
+        controller.abort()
+        return staged
+      })
+      try {
+        const cancelled = await postMessages(server.app, { ...request, signal: controller.signal })
+        expect(cancelled.ok).toBe(false)
+        expect(failAfterWrite).toHaveBeenCalledTimes(1)
+      } finally { failAfterWrite.mockRestore() }
+      if (outcome === "unknown commit") {
+        expect(lookupPriorityAssignmentResult("opencode:" + session)).toMatchObject({ attempt: { blocked: true } })
+        expect((await postMessages(server.app, request)).status).toBe(409)
+        expect(capturedSdkCalls).toEqual([])
+        return
+      }
+      expect(durableRoute(session)).toMatchObject({ profileId: previous.profileId, mappingKey: previous.mappingKey, mappingGeneration: previous.mappingGeneration })
+      const rolledBack = lookupPriorityAssignmentResult("opencode:" + session)
+      if (rolledBack.status === "error") throw rolledBack.error
+      expect(rolledBack.attempt).toBeUndefined()
+      const retry = await postMessages(server.app, request)
+      expect(retry.status).toBe(200)
+      expect(await retry.json()).toEqual(firstAnswer)
+      expect(capturedSdkCalls).toEqual([])
+    } finally {
+      await server.closeBackend?.()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it.each([false, true])("includes local agy capacity in the pool retry wait without benching it (stream=%s)", async stream => {
+    process.env.MERIDIAN_PROFILE_ORDER = "work,personal,agy-account"
+    failingDirs.add("prof-work")
+    failingDirs.add("prof-personal")
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    const capacity = spyOn(AntigravityRuntime.prototype, "create").mockRejectedValueOnce(new AgPoolFailure("capacity", "Local process capacity", 5))
+    try {
+      const model = "claude-sonnet-5-5"
+      const response = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders("agy-at-capacity", "capacity"), model, stream })
+      const body = await response.text()
+      expect(body).toContain("rate_limit_error")
+      expect(body).not.toContain("Local process capacity")
+      expect(capacity).toHaveBeenCalledTimes(1)
+      const wait = stream ? Number(body.match(/"retry_after":(\d+)/)?.[1]) : Number(response.headers.get("retry-after"))
+      expect(wait).toBeGreaterThan(0)
+      expect(wait).toBeLessThanOrEqual(5)
+      const next = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders("agy-slots-free", "capacity"), model, stream: false })
+      expect(next.status).toBe(200)
+      expect(durableRoute("agy-slots-free").profileId).toBe("agy-account")
+    } finally {
+      capacity.mockRestore()
+      await server.closeBackend?.()
+    }
+  })
+
+  it("replays the full client history on Claude after an agy turn", async () => {
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    try {
+      const session = "agy-claude-return"
+      const model = "claude-sonnet-5-5"
+      const first = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders(session, "start"), model, stream: false, content: "Opening Claude question" })
+      expect(first.status).toBe(200)
+      const reply = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }).parse(await first.json())
+      const original = capturedSdkCalls.at(-1)?.sessionId
+      expect(typeof original).toBe("string")
+      const history = [{ role: "user", content: "Opening Claude question" }, { role: "assistant", content: reply.content },
+        { role: "user", content: "SKIP_TOOLS intervening agy request" }] satisfies TestMessage[]
+      process.env.MERIDIAN_PROFILE_ORDER = "work,personal,agy-account"
+      failureMessage = SUBSCRIPTION_REFUSAL
+      failingDirs.add("prof-work")
+      failingDirs.add("prof-personal")
+      const away = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders(session, "away"), model, stream: false, content: history })
+      expect(away.status).toBe(200)
+      const agyReply = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }).parse(await away.json())
+      expect(durableRoute(session).profileId).toBe("agy-account")
+      failingDirs.clear()
+      process.env.MERIDIAN_PROFILE_ORDER = "work,personal"
+      capturedSdkCalls = []
+      capturedReplayPrompt = []
+      const back = await postMessages(server.app, { headers: trustedOpenCodeTurnHeaders(session, "back"), model, stream: false,
+        content: [...history, { role: "assistant", content: agyReply.content }, { role: "user", content: "Back to Claude" }] })
+      expect(back.status).toBe(200)
+      expect(capturedSdkCalls).toHaveLength(1)
+      expect(capturedSdkCalls[0]?.resume).toBeUndefined()
+      expect(typeof capturedSdkCalls[0]?.sessionId).toBe("string")
+      expect(capturedSdkCalls[0]?.sessionId).not.toBe(original)
+      expect(durableRoute(session).profileId).toBe("work")
+      const replay = capturedReplayPrompt.join("\n")
+      for (const text of ["Opening Claude question", "ok from /tmp/meridian-test-prof-work", "intervening agy request", "READY", "Back to Claude"]) expect(replay).toContain(text)
+    } finally {
+      capturedReplayPrompt = undefined
+      await server.closeBackend?.()
+    }
   })
 
   it("fails over per request when the preferred profile is rate-limited", async () => {
