@@ -7,6 +7,10 @@ const sample: ProviderSnapshot = { fetchedAt: 1000, providers: [
   { ...disabledProvider('claude'), enabled: true, status: 'healthy', activity: { requests: 2, errors: 0, inputTokens: 10, outputTokens: 2, cacheReadTokens: 0 }, accounts: [{ id: '<script>alert(1)</script>', fetchedAt: 1000, windows: [{ type: '5h', utilization: .25, resetsAt: 900000 }] }] },
   { ...disabledProvider('antigravity'), enabled: true, status: 'unavailable', error: 'quota unavailable', accounts: [] },
 ] }
+const unknownReset: ProviderSnapshot = { fetchedAt: 1000, providers: [{
+  ...disabledProvider('antigravity'), enabled: true, status: 'healthy',
+  accounts: [{ id: 'agy', fetchedAt: 1000, windows: [{ type: 'gemini-weekly', utilization: .125, resetsAt: null }] }],
+}] }
 describe('provider presentation and contract', () => {
   it('keeps unavailable providers visible and labels partial totals', () => {
     const html = providerOverview(sample)
@@ -34,6 +38,17 @@ describe('provider presentation and contract', () => {
   it('rejects malformed desktop provider data rather than rendering invented numbers', () => {
     expect(parseProviderSnapshot(sample)).toEqual(sample)
     expect(() => parseProviderSnapshot({ ...sample, providers: [{ id: 'antigravity' }] })).toThrow()
+  })
+  it('preserves an unknown Antigravity reset in the desktop provider snapshot', () => {
+    expect(parseProviderSnapshot(unknownReset).providers[0]?.accounts[0]?.windows).toEqual([
+      { type: 'gemini-weekly', utilization: .125, resetsAt: null },
+    ])
+  })
+  it('shows utilization without a reset date or stale marker when only the reset is unknown', () => {
+    const html = providerOverview(unknownReset, 'antigravity')
+    expect(html).toContain('<strong>13% used</strong>')
+    expect(html).toContain('<small>Reset time unavailable</small>')
+    expect(html).not.toContain('1970')
   })
   it('normalizes Claude token counts and omits absent activity', () => {
     expect(claudeProvider({status:'healthy'}, {}, {}).activity).toBeUndefined()

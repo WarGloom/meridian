@@ -7,7 +7,7 @@ export interface ProviderUsage {
   error?: string; models?: string[]; observedSince?: number;
   capabilities?: Array<{ name: string; status: string; detail: string }>;
   activity?: { requests: number; errors: number; inputTokens: number; outputTokens: number; cacheReadTokens: number };
-  accounts: Array<{ id: string; label?: string; active?: boolean; fetchedAt?: number; error?: string; windows: Array<{ type: string; group?: string; utilization: number; resetsAt: number }> }>;
+  accounts: Array<{ id: string; label?: string; active?: boolean; fetchedAt?: number; error?: string; windows: Array<{ type: string; group?: string; utilization: number; readonly resetsAt: number | null }> }>;
 }
 export interface ProviderSnapshot { providers: ProviderUsage[]; fetchedAt: number }
 export type ProviderFilter = 'all' | ProviderId
@@ -36,7 +36,7 @@ export function parseProviderSnapshot(value: unknown): ProviderSnapshot {
         return { id: string(a.id), label: optionalString(a.label), active: a.active === undefined ? undefined : boolean(a.active), fetchedAt: optionalNumber(a.fetchedAt), error: optionalString(a.error), windows: array(a.windows).map(value => {
           const w = object(value), utilization = count(w.utilization)
           if (utilization > 1) return fail()
-          return { type: string(w.type), group: optionalString(w.group), utilization, resetsAt: number(w.resetsAt) }
+          return { type: string(w.type), group: optionalString(w.group), utilization, resetsAt: w.resetsAt === null ? null : number(w.resetsAt) }
         }) }
       }) }
   }) }
@@ -61,9 +61,9 @@ export function providerOverview(data: ProviderSnapshot, filter: ProviderFilter 
       ${p.enabled ? `<p class="provider-endpoint">${esc(p.endpoint)}</p>${p.error ? `<p class="provider-warning" role="status">${esc(p.error)}</p>` : ''}
       ${p.activity ? `<div class="provider-activity"><span><strong>${num(p.activity.requests)}</strong> requests</span><span><strong>${num(p.activity.inputTokens + p.activity.outputTokens)}</strong> tokens</span></div>` : '<p class="provider-caption">Activity unavailable</p>'}
       ${p.accounts.map(account => `<section class="provider-account"><h3>${esc(account.label ?? account.id)}${account.active ? ' <span class="provider-caption">· Current account</span>' : ''}</h3>${account.error ? `<p class="provider-warning">${esc(account.error)}${account.windows.length ? ' · Last known limits shown below.' : ''}</p>` : ''}${account.windows.map(w => {
-        const stale = !!account.error || !account.fetchedAt || data.fetchedAt - account.fetchedAt > 90000 || w.resetsAt <= data.fetchedAt
+        const stale = !!account.error || !account.fetchedAt || data.fetchedAt - account.fetchedAt > 90000 || (w.resetsAt !== null && w.resetsAt <= data.fetchedAt)
         const value = Math.round(w.utilization * 100)
-        return `<div class="provider-quota"><div><span>${esc(w.group ? w.group + ' · ' : '')}${esc(windowLabel(w.type))}</span><strong>${value}% used${stale ? ' · stale' : ''}</strong></div><progress max="1" value="${w.utilization}" class="${stale ? 'stale' : value >= 85 ? 'danger' : value >= 60 ? 'warning' : ''}" aria-label="${esc(w.group || p.name)} ${esc(w.type)} usage"></progress><small>${stale ? 'Last known reset' : 'Resets'} ${esc(new Date(w.resetsAt).toLocaleString())}</small></div>`
+        return `<div class="provider-quota"><div><span>${esc(w.group ? w.group + ' · ' : '')}${esc(windowLabel(w.type))}</span><strong>${value}% used${stale ? ' · stale' : ''}</strong></div><progress max="1" value="${w.utilization}" class="${stale ? 'stale' : value >= 85 ? 'danger' : value >= 60 ? 'warning' : ''}" aria-label="${esc(w.group || p.name)} ${esc(w.type)} usage"></progress><small>${w.resetsAt === null ? 'Reset time unavailable' : `${stale ? 'Last known reset' : 'Resets'} ${esc(new Date(w.resetsAt).toLocaleString())}`}</small></div>`
       }).join('') || '<p class="provider-caption">No current quota data</p>'}</section>`).join('') || '<p class="provider-caption">No account data available</p>'}
       ${p.capabilities?.length ? `<details class="provider-capabilities"><summary>Capabilities and limits</summary><dl>${p.capabilities.map(capability => `<div><dt>${esc(capability.name)} <span>${esc(capability.status)}</span></dt><dd>${esc(capability.detail)}</dd></div>`).join('')}</dl></details>` : ''}
       ${p.models?.length ? `<details><summary>${p.models.length} account models</summary><ul class="provider-models">${p.models.map(m => `<li>${esc(m)}</li>`).join('')}</ul></details>` : ''}

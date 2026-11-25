@@ -53,6 +53,14 @@ provider service*; public routes and headers are in
 [`api-contract`](../../../.agents/references/api-contract.md); feature status in
 `docs/antigravity-support.md`.
 
+### Quota reset times
+
+A bucket in `agy /usage` may omit `reset_time`. Meridian keeps the bucket and
+its utilization and reports `resetsAt: null` (unknown). A supplied reset time
+must be a parseable date; malformed values still fail the quota refresh.
+All other required fields stay required. Quota snapshots do not drive pool
+cooldowns.
+
 ### Participation in the Claude priority pool
 
 The combined listener uses a private attempt API on the same backend instance.

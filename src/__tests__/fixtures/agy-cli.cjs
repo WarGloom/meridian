@@ -61,7 +61,11 @@ async function main(inputPrompt) {
   }
   if (prompt === '/config' && process.env.AGY_FIXTURE_CONFIG_EXIT) return process.exit(2)
   if (prompt === '/config') return emit({ conversation_id: '', status: 'SUCCESS', duration_seconds: 0, num_turns: 0, response: 'customModelsConfig\t' + (process.env.AGY_FIXTURE_CUSTOM ? '{"fixture":{}}' : '') + '\nmodelProvider\t' + (process.env.AGY_FIXTURE_API ? 'gemini' : '') + '\ngcp\t\nuseG1Credits\tfalse' })
-  if (prompt === '/usage') return emit({command:{data:{groups:[{name:'Gemini Models',buckets:[{id:'gemini-5h',window:'5h',remaining_fraction:0.75,reset_time:'2099-01-01T00:00:00Z'}]}]}}})
+  if (prompt === '/usage') {
+    const buckets = [{ id: 'gemini-5h', window: '5h', remaining_fraction: 0.75, reset_time: '2099-01-01T00:00:00Z' }]
+    if (process.env.AGY_FIXTURE_QUOTA) buckets.push({ id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.875, reset_time: process.env.AGY_FIXTURE_QUOTA === 'malformed' ? 'not a date' : undefined })
+    return emit({ command: { data: { groups: [{ name: 'Gemini Models', buckets }] } } })
+  }
   if (prompt.includes('POLICY_PROBE')) {
     const check = (input, decision) => {
       const child = spawnSync(process.execPath, ['policy.cjs'], { input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8' })

@@ -37,9 +37,9 @@ export interface AgExchange {
 const exchangeSchema = z.object({ conversationId: z.string().optional(), continuation: z.string().optional(), requestId: z.string(), timestamp: z.number(), durationMs: z.number(), model: z.string(), status: z.number(), error: z.string().optional(), inputTokens: z.number(), outputTokens: z.number(), cacheReadTokens: z.number() })
 const nativeSchema = z.object({ runId: z.string(), name: z.string(), state: z.string(), timestamp: z.number() })
 const quotaSchema = z.object({ command: z.object({ data: z.object({ groups: z.array(z.object({
-  name: z.string(), buckets: z.array(z.object({ id: z.string(), window: z.string(), remaining_fraction: z.number().min(0).max(1), reset_time: z.string() })),
+  name: z.string(), buckets: z.array(z.object({ id: z.string(), window: z.string(), remaining_fraction: z.number().min(0).max(1), reset_time: z.string().optional() })),
 })) }) }) })
-export interface AgQuota { fetchedAt?: number; error?: string; windows: Array<{ type: string; group: string; utilization: number; resetsAt: number }> }
+export interface AgQuota { fetchedAt?: number; error?: string; windows: Array<{ type: string; group: string; utilization: number; readonly resetsAt: number | null }> }
 const exec = promisify(execFile)
 const envelope = z.object({
   event: z.string(), conversation_id: z.string().optional(),
@@ -720,8 +720,8 @@ export class AntigravityRuntime {
         await this.verifyAccount()
         const result = await exec(this.executable, ["-p", "/usage", "--output-format", "json"], { env: this.childEnv, timeout: 20_000, maxBuffer: 1024 * 1024, signal: this.shutdown.signal })
         const groups = quotaSchema.parse(JSON.parse(result.stdout)).command.data.groups
-        const windows = groups.flatMap(group => group.buckets.map(bucket => ({ type: bucket.id, group: group.name, utilization: 1 - bucket.remaining_fraction, resetsAt: Date.parse(bucket.reset_time) })))
-        if (windows.some(window => !Number.isFinite(window.resetsAt))) throw new Error("CLI returned an invalid quota reset time")
+        const windows = groups.flatMap(group => group.buckets.map(bucket => ({ type: bucket.id, group: group.name, utilization: 1 - bucket.remaining_fraction, resetsAt: bucket.reset_time === undefined ? null : Date.parse(bucket.reset_time) })))
+        if (windows.some(window => window.resetsAt !== null && !Number.isFinite(window.resetsAt))) throw new Error("CLI returned an invalid quota reset time")
         this.quota = { fetchedAt: Date.now(), windows }
       } catch (error) { this.quota = { ...this.quota, error: error instanceof Error ? error.message : String(error) } }
       this.quotaCheckedAt = Date.now()

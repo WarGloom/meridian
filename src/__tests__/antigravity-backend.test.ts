@@ -529,15 +529,34 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
     expect(runtime.preparing).toBe(0)
     expect(runtime.runs.size).toBe(0)
   })
+  it("keeps all CLI quota buckets when a reset time is absent", async () => {
+    const { runtime } = fixture()
+    runtime.childEnv.AGY_FIXTURE_QUOTA = "missing"
+    const quota = await runtime.accountQuota()
+    expect(quota.error).toBeUndefined()
+    expect(quota.windows).toEqual([
+      { type: "gemini-5h", group: "Gemini Models", utilization: 0.25, resetsAt: 4070908800000 },
+      { type: "gemini-weekly", group: "Gemini Models", utilization: 0.125, resetsAt: null },
+    ])
+  })
+
+  it("rejects the quota fetch when a reset time is malformed", async () => {
+    const { runtime } = fixture()
+    runtime.childEnv.AGY_FIXTURE_QUOTA = "malformed"
+    expect(await runtime.accountQuota()).toEqual({ error: "CLI returned an invalid quota reset time", windows: [] })
+  })
+
   it("exposes real CLI quota groups separately from observed tokens", async () => {
     const { server, send, runtime } = fixture()
+    runtime.childEnv.AGY_FIXTURE_QUOTA = "missing"
     await send({ ...initial(), tools: [] })
     await runtime.accountQuota()
     const response = await server.app.fetch(new Request("http://local/providers/status"))
-    const body = await response.json() as { providers: Array<{ id: string; activity?: { requests: number }; accounts: Array<{ windows: Array<{ utilization: number; group: string }> }> }> }
+    const body = await response.json() as { providers: Array<{ id: string; activity?: { requests: number }; accounts: Array<{ windows: Array<{ utilization: number; group: string; resetsAt: number | null }> }> }> }
     const provider = body.providers.find(p => p.id === "antigravity")!
     expect(provider.activity?.requests).toBe(1)
     expect(provider.accounts[0]!.windows[0]).toMatchObject({ group: "Gemini Models", utilization: 0.25 })
+    expect(provider.accounts[0]!.windows[1]).toMatchObject({ group: "Gemini Models", utilization: 0.125, resetsAt: null })
     const page = await server.app.fetch(new Request("http://local/providers/view?provider=antigravity"))
     expect(await page.text()).toContain('data-provider-card="antigravity"')
   })
