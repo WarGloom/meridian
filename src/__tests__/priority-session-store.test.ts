@@ -1,4 +1,6 @@
 import { BOOKKEEPING_FILENAME } from "../proxy/session/bookkeeping/database"
+import { sqliteSessionStoreBackend } from "../proxy/session/bookkeeping/sqliteStoreBackend"
+import { agyAssignmentKey } from "../proxy/session/bookkeeping/legacyCodec"
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { setupStoreBackend, teardownStoreBackend, legacyStoreOnly, sqliteStoreTest } from "./fixtures/bookkeeping-store-backend"
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
@@ -13,12 +15,15 @@ import {
   lookupPriorityAssignmentResult,
   lookupSharedSession,
   lookupSharedSessionResult,
+  parseStoreDocument,
   readSessionStoreSnapshot,
   readSessionStoreGenerationSnapshot,
   releasePriorityAttempt,
   rollbackSharedSessionAndPriorityAssignment,
   setSessionStoreDir,
   storeSharedSession,
+  storeAgyPriorityAssignment,
+  decodeAgyPriorityAssignment,
   storeSharedSessionAndPriorityAssignment,
 } from "../proxy/sessionStore"
 
@@ -102,6 +107,94 @@ async function atomicPublish(input: {
 
 describe("durable priority route publication", () => {
   let dir: string
+
+  it("settles an agy assignment without an SDK mapping and rolls back same-key and cross-owner attempts", async () => {
+    const routeKey = "opencode:agy-route"
+    const stage = async (digest: string, issuedAt: number) => {
+      const route = lookupPriorityAssignmentResult(routeKey)
+      if (route.status === "error") throw route.error
+      const claim = await claimPriorityAttempt({ routeKey, expectedAssignmentGeneration: route.generation, turn: { turnId: digest, issuedAt } })
+      if (!claim) throw new Error("claim failed")
+      const options = { modelSlug: "claude-sonnet-5-5-high", attemptOwnerToken: claim.ownerToken,
+        priority: { routeKey, lastHumanTurnDigest: digest, lastHumanTurnIssuedAt: issuedAt, expectedAssignmentGeneration: route.generation } } as const
+      expect(await storeAgyPriorityAssignment({ ...options, attemptOwnerToken: "7ac69cf1-3400-455e-b098-ad9bc8e16ae1" })).toBe(false)
+      const staged = await storeAgyPriorityAssignment(options)
+      if (!staged) throw new Error("agy publication failed")
+      return { ...staged, routeKey, attemptOwnerToken: claim.ownerToken,
+        expectedAssignmentGeneration: staged.assignmentGeneration, expectedMappingGeneration: staged.mappingGeneration }
+    }
+    const first = await stage(HUMAN_A, 100)
+    expect(await storeSharedSession(first.key, "not-an-agy-session")).toBe(false)
+    if (sqliteStoreTest) expect(sqliteSessionStoreBackend.storeSharedSession(dir, first.key, "not-an-agy-session")).toBe(false)
+    expect(await finalizeSharedSessionAndPriorityAssignment(first)).toBe(true)
+    expect(lookupSharedSessionResult(first.key).status).toBe("missing")
+    const sameKey = await stage(HUMAN_B, 101)
+    expect(sameKey.key).toBe(first.key)
+    const restored = await rollbackSharedSessionAndPriorityAssignment(sameKey)
+    expect(restored).toMatchObject({ restoredMapping: null, restoredAssignment: {
+      profileId: "agy-account", mappingKey: first.key, mappingGeneration: first.mappingGeneration, lastHumanTurnDigest: HUMAN_A,
+    } })
+    expect(await releasePriorityAttempt(routeKey, sameKey.attemptOwnerToken)).toBe(true)
+    const route = lookupPriorityAssignmentResult(routeKey)
+    if (route.status !== "found") throw new Error("agy route missing")
+    expect(decodeAgyPriorityAssignment(routeKey, route.assignment)).toBe("claude-sonnet-5-5-high")
+    expect(decodeAgyPriorityAssignment("some-other-route", route.assignment)).toBeUndefined()
+    const claim = await claimPriorityAttempt({ routeKey, expectedAssignmentGeneration: route.generation, turn: { turnId: HUMAN_C, issuedAt: 102 } })
+    if (!claim) throw new Error("Claude claim failed")
+    const key = "work:agy-route"
+    const claude = await atomicPublish({ routeKey, mappingKey: key, profileId: "work", sdkSessionId: "sdk-claude", digest: HUMAN_C,
+      issuedAt: 102, attemptOwnerToken: claim.ownerToken })
+    if (!claude) throw new Error("Claude publication failed")
+    if (!sqliteStoreTest) {
+      const persisted = parseStoreDocument(readFileSync(join(dir, "sessions.json"), "utf8"))
+      expect(Object.keys(persisted.sessions)).toEqual([key])
+    }
+    expect(await rollbackSharedSessionAndPriorityAssignment({ ...claude, routeKey, key, attemptOwnerToken: claim.ownerToken,
+      expectedAssignmentGeneration: claude.assignmentGeneration, expectedMappingGeneration: claude.mappingGeneration })).toMatchObject({
+      restoredMapping: null, restoredAssignment: { mappingKey: first.key, mappingGeneration: first.mappingGeneration },
+    })
+    expect(readSessionStoreSnapshot()).toEqual({})
+  })
+
+  legacyStoreOnly("leaves a pre-existing raw Claude mapping intact on agy key collision", async () => {
+    const routeKey = "opencode:historic"
+    const modelSlug = "claude-sonnet-5-5-high"
+    const key = agyAssignmentKey(routeKey, modelSlug)
+    const historic = { claudeSessionId: "sdk-old", messageCount: 1, createdAt: 100, lastUsedAt: 200 }
+    writeFileSync(join(dir, "sessions.json"), JSON.stringify({ [key]: historic }))
+    const route = lookupPriorityAssignmentResult(routeKey)
+    if (route.status === "error") throw route.error
+    const turn = { turnId: HUMAN_A, issuedAt: 100 }
+    const claim = await claimPriorityAttempt({ routeKey, expectedAssignmentGeneration: route.generation, turn })
+    if (!claim) throw new Error("agy claim failed")
+    expect(await storeAgyPriorityAssignment({ modelSlug, attemptOwnerToken: claim.ownerToken,
+      priority: { routeKey, lastHumanTurnDigest: turn.turnId, lastHumanTurnIssuedAt: turn.issuedAt, expectedAssignmentGeneration: route.generation } })).toBe(false)
+    expect(lookupSharedSessionResult(key)).toMatchObject({ status: "found", session: historic })
+    expect(lookupPriorityAssignmentResult(routeKey).status).toBe("missing")
+  })
+
+  it("keeps the prior Claude mapping unchanged when an agy promotion rolls back", async () => {
+    const routeKey = "opencode:claude-route"
+    const key = "work:claude-route"
+    const claude = await atomicPublish({ routeKey, mappingKey: key, profileId: "work", sdkSessionId: "sdk-retained", digest: HUMAN_A })
+    if (!claude) throw new Error("Claude publication failed")
+    expect(await finalizeSharedSessionAndPriorityAssignment({ key, routeKey, expectedMappingGeneration: claude.mappingGeneration,
+      expectedAssignmentGeneration: claude.assignmentGeneration })).toBe(true)
+    const route = lookupPriorityAssignmentResult(routeKey)
+    if (route.status !== "found") throw new Error("Claude route missing")
+    const turn = { turnId: HUMAN_B, issuedAt: 1_900_000_001 }
+    const claim = await claimPriorityAttempt({ routeKey, expectedAssignmentGeneration: route.generation, turn })
+    if (!claim) throw new Error("agy claim failed")
+    const snapshot = readSessionStoreSnapshot()
+    const staged = await storeAgyPriorityAssignment({ modelSlug: "claude-opus-5-5-high", attemptOwnerToken: claim.ownerToken,
+      priority: { routeKey, lastHumanTurnDigest: turn.turnId, lastHumanTurnIssuedAt: turn.issuedAt, expectedAssignmentGeneration: route.generation } })
+    if (!staged) throw new Error("agy publication failed")
+    expect(await rollbackSharedSessionAndPriorityAssignment({ ...staged, routeKey, attemptOwnerToken: claim.ownerToken,
+      expectedMappingGeneration: staged.mappingGeneration, expectedAssignmentGeneration: staged.assignmentGeneration })).toMatchObject({
+      restoredMapping: null, restoredAssignment: { profileId: "work", mappingKey: key, mappingGeneration: claude.mappingGeneration },
+    })
+    expect(readSessionStoreSnapshot()).toEqual(snapshot)
+  })
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "meridian-priority-store-"))

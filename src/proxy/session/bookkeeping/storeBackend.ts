@@ -3,7 +3,7 @@ import type { StoredSessionGeneration, PriorityAssignmentGeneration } from "./le
 import type { ProfileCopyPruneOptions } from "./profileCopies"
 import type {
   SharedSessionLookupResult, PriorityAssignmentLookupResult, PriorityAttemptTurn, PriorityAttemptClaim,
-  SharedSessionAndPriorityAssignmentOptions, SharedSessionAndPriorityAssignmentResult,
+  PriorityPublicationOptions, SharedSessionAndPriorityAssignmentResult,
   FinalizeSharedSessionAndPriorityAssignmentOptions, RollbackSharedSessionAndPriorityAssignmentOptions,
   RollbackSharedSessionAndPriorityAssignmentResult, SessionRecoveryInfo, StoreSessionArguments,
 } from "./storeTypes"
@@ -24,7 +24,7 @@ export interface SessionStoreBackend {
   }): PriorityAttemptClaim | false
   releasePriorityAttempt(directory: string, route: string, token: string): boolean
   blockPriorityAttempt(directory: string, route: string, token: string): boolean
-  storeSharedSessionAndPriorityAssignment(directory: string, options: SharedSessionAndPriorityAssignmentOptions):
+  storeSharedSessionAndPriorityAssignment(directory: string, options: PriorityPublicationOptions):
     SharedSessionAndPriorityAssignmentResult | false
   finalizeSharedSessionAndPriorityAssignment(directory: string,
     options: FinalizeSharedSessionAndPriorityAssignmentOptions): boolean

@@ -1,5 +1,7 @@
 /** Legacy-only codecs. SQLite request operations must not parse full legacy documents. */
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
+import { parseAgyClaudeModelSlug, type AgyClaudeModelSlug } from "../../effort"
+import { AGY_ACCOUNT_ID } from "../../routing"
 import { isUuidV4 } from "./uuid"
 export { UUID_PATTERN } from "./uuid"
 import { isAbsolute } from "node:path"
@@ -496,6 +498,36 @@ export function validateStoreMeta(value: unknown): SessionStoreMeta {
 }
 
 /** Parse and validate raw store bytes, for both the strict and the cached read. */
+const AGY_ASSIGNMENT_PREFIX = "@meridian/agy-owner/v1/"
+
+export function isAgyAssignmentKey(key: string): boolean {
+  return key.startsWith(AGY_ASSIGNMENT_PREFIX) && !key.includes(":")
+}
+
+export function agyAssignmentKey(routeKey: string, slug: AgyClaudeModelSlug): string {
+  return `${AGY_ASSIGNMENT_PREFIX}${keyDigest(routeKey)}/${slug}`
+}
+
+export function agyAssignmentGeneration(key: string): StoredSessionGeneration {
+  return `p:${keyDigest(key)}:${randomUUID()}`
+}
+
+function agyAssignmentSlug(routeKey: string, entry: Pick<DurablePriorityAssignment, "mappingKey" | "mappingGeneration">): AgyClaudeModelSlug | undefined {
+  const prefix = `${AGY_ASSIGNMENT_PREFIX}${keyDigest(routeKey)}/`
+  const generation = `p:${keyDigest(entry.mappingKey)}:`
+  if (!entry.mappingKey.startsWith(prefix) || !entry.mappingGeneration.startsWith(generation)
+    || !isUuidV4(entry.mappingGeneration.slice(generation.length))) return undefined
+  return parseAgyClaudeModelSlug(entry.mappingKey.slice(prefix.length))
+}
+
+export function isAgyAssignmentMarker(routeKey: string, entry: Pick<DurablePriorityAssignment, "mappingKey" | "mappingGeneration">): boolean {
+  return agyAssignmentSlug(routeKey, entry) !== undefined
+}
+
+export function decodeAgyPriorityAssignment(routeKey: string, assignment: DurablePriorityAssignment): AgyClaudeModelSlug | undefined {
+  return assignment.profileId === AGY_ACCOUNT_ID ? agyAssignmentSlug(routeKey, assignment) : undefined
+}
+
 export function parseStoreDocument(data: string): SessionStoreDocument {
   const parsed: unknown = JSON.parse(data)
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -515,7 +547,8 @@ export function parseStoreDocument(data: string): SessionStoreDocument {
     for (const [routeKey, rollback] of Object.entries(meta.priorityRollbackMappings)) {
       const assignment = meta.priorityAssignments[routeKey]!
       const mapping = sessions[rollback.mappingKey]
-      if (!mapping) {
+      const agy = isAgyAssignmentMarker(routeKey, rollback)
+      if (!mapping && !agy) {
         throw new Error(`session store priority rollback ${JSON.stringify(routeKey)} has no retained mapping`)
       }
       if (rollback.mappingKey === assignment.mappingKey) {
@@ -523,7 +556,7 @@ export function parseStoreDocument(data: string): SessionStoreDocument {
           `session store priority rollback ${JSON.stringify(routeKey)} aliases its current mapping`,
         )
       }
-      if (getStoredSessionGeneration(mapping, rollback.mappingKey) !== rollback.mappingGeneration) {
+      if (mapping && (agy || getStoredSessionGeneration(mapping, rollback.mappingKey) !== rollback.mappingGeneration)) {
         throw new Error(
           `session store priority rollback ${JSON.stringify(routeKey)} has a stale mapping generation`,
         )

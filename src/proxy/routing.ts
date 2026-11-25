@@ -191,6 +191,33 @@ export function resolvePriorityOrder(
   return { order, unknown }
 }
 
+export const AGY_ACCOUNT_ID = "agy-account"
+type ClaudePoolCandidate =
+  | { readonly provider: "claude"; readonly id: string }
+  | { readonly provider: "antigravity"; readonly id: typeof AGY_ACCOUNT_ID }
+
+export function resolveClaudePoolOrder(input: {
+  readonly claudeIds: readonly string[]
+  readonly otherIds: readonly string[]
+  readonly order: readonly string[] | undefined
+  readonly combined: boolean
+}): { readonly candidates: readonly ClaudePoolCandidate[]; readonly unknown: readonly string[];
+  readonly agyEnrollment: "disabled" | "collision" | "enrolled" } {
+  const { order, unknown } = resolvePriorityOrder(input.claudeIds, input.order)
+  const candidates: ClaudePoolCandidate[] = order.map(id => ({ provider: "claude", id }))
+  const knownOther = new Set(input.otherIds)
+  const agyIndex = input.order?.indexOf(AGY_ACCOUNT_ID) ?? -1
+  if (!input.combined || agyIndex < 0) {
+    return { candidates, unknown: unknown.filter(id => !knownOther.has(id)), agyEnrollment: "disabled" }
+  }
+  if (order.includes(AGY_ACCOUNT_ID) || knownOther.has(AGY_ACCOUNT_ID)) {
+    return { candidates, unknown: unknown.filter(id => !knownOther.has(id)), agyEnrollment: "collision" }
+  }
+  const anchor = input.order?.slice(agyIndex + 1).find(id => order.includes(id))
+  candidates.splice(anchor === undefined ? candidates.length : order.indexOf(anchor), 0, { provider: "antigravity", id: AGY_ACCOUNT_ID })
+  return { candidates, unknown: unknown.filter(id => id !== AGY_ACCOUNT_ID && !knownOther.has(id)), agyEnrollment: "enrolled" }
+}
+
 /**
  * Pick the highest-priority profile that isn't exhausted. When every pool
  * member is exhausted, return the preferred (first) profile with the flag
@@ -330,6 +357,10 @@ export class ProfileExhaustion {
   forget(id: string): void {
     this.marks.delete(id)
     this.modelMarks.delete(id)
+  }
+
+  until(id: string, family: ClaudeModelFamily): number {
+    return Math.max(this.marks.get(id)?.until ?? 0, this.modelMarks.get(id)?.get(family)?.until ?? 0)
   }
 
   forgetModel(id: string, family: ClaudeModelFamily): void {

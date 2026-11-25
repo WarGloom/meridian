@@ -1,5 +1,7 @@
 import type { StoredSession, TranscriptLocator } from "./types"
 import type { TokenUsage } from "../lineage"
+import type { AgyClaudeModelSlug } from "../../effort"
+import type { AGY_ACCOUNT_ID } from "../../routing"
 import type {
   StoredSessionGeneration, DurablePriorityAssignment, PriorityAssignmentGeneration, DurablePriorityAttempt,
 } from "./legacyCodec"
@@ -53,6 +55,17 @@ export interface SharedSessionAndPriorityAssignmentResult {
   previousMapping: StoredSession | null
   previousAssignment: DurablePriorityAssignment | null
 }
+export type AgyPriorityAssignmentOptions = {
+  readonly modelSlug: AgyClaudeModelSlug
+  readonly attemptOwnerToken: string
+  readonly priority: Omit<SharedSessionPriorityPublication, "profileId">
+}
+
+export type PriorityPublicationOptions = SharedSessionAndPriorityAssignmentOptions | (AgyPriorityAssignmentOptions & {
+  readonly key: string
+  readonly priority: SharedSessionPriorityPublication & { readonly profileId: typeof AGY_ACCOUNT_ID }
+})
+
 export interface FinalizeSharedSessionAndPriorityAssignmentOptions {
   key: string
   routeKey: string

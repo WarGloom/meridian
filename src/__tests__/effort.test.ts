@@ -8,7 +8,19 @@
  * instead of erroring the whole request.
  */
 import { describe, it, expect } from "bun:test"
-import { normalizeEffort, VALID_EFFORTS } from "../proxy/effort"
+import { normalizeEffort, selectAgyClaudeModel, VALID_EFFORTS } from "../proxy/effort"
+
+it("selects only the exact agy model and requested effort, defaulting to high", () => {
+  const catalog = ["claude-sonnet-5-5-high", "claude-sonnet-5-5-low", "claude-opus-5-5-medium"]
+  expect(selectAgyClaudeModel("claude-sonnet-5-5", undefined, catalog)).toBe("claude-sonnet-5-5-high")
+  expect(selectAgyClaudeModel("claude-sonnet-5-5", "low", catalog)).toBe("claude-sonnet-5-5-low")
+  expect(selectAgyClaudeModel("claude-opus-5-5", "medium", catalog)).toBe("claude-opus-5-5-medium")
+  for (const [model, effort] of [["claude-sonnet-5-1", "high"], ["claude-sonnet-5-5[1m]", "high"],
+    ["sonnet", "low"], ["claude-sonnet-5-5", "max"], ["claude-sonnet-5-5", ""],
+    ["claude-sonnet-5-5", "medium"], ["claude-opus-5-5", undefined]] as const) {
+    expect(selectAgyClaudeModel(model, effort, catalog)).toBeUndefined()
+  }
+})
 
 describe("normalizeEffort", () => {
   it("passes through every valid Claude effort level", () => {

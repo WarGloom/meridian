@@ -14,6 +14,7 @@ import {
   getPriorityFailbackPolicy,
   shouldPromotePriorityAssignment,
   resolvePriorityOrder,
+  resolveClaudePoolOrder,
   choosePriorityProfile,
   chooseActivePriorityCandidates,
   lastMappedProfile,
@@ -127,6 +128,20 @@ describe("getRoutingMode", () => {
 })
 
 describe("priority routing (#priority-spec)", () => {
+  it("enrolls agy only explicitly and preserves Claude ordering around its anchor", () => {
+    const options = { claudeIds: ["personal", "work", "ci"], combined: true, otherIds: ["seat"] }
+    const ids = (order: readonly string[]) => resolveClaudePoolOrder({ ...options, order }).candidates.map(candidate => candidate.id)
+    expect(ids(["work"])).toEqual(["work", "personal", "ci"])
+    expect(ids(["work", "agy-account", "seat"])).toEqual(["work", "personal", "ci", "agy-account"])
+    const anchored = resolveClaudePoolOrder({ ...options, order: ["agy-account", "unknown", "work", "agy-account"] })
+    expect(anchored.candidates).toEqual([
+      { provider: "antigravity", id: "agy-account" }, { provider: "claude", id: "work" },
+      { provider: "claude", id: "personal" }, { provider: "claude", id: "ci" },
+    ])
+    expect(anchored.unknown).toEqual(["unknown"])
+    expect(resolveClaudePoolOrder({ ...options, combined: false, order: ["agy-account"] }).agyEnrollment).toBe("disabled")
+    expect(resolveClaudePoolOrder({ ...options, otherIds: ["agy-account"], order: ["agy-account"] }).agyEnrollment).toBe("collision")
+  })
   it("getRoutingMode accepts 'priority'", () => {
     expect(getRoutingMode("priority")).toBe("priority")
     expect(getRoutingMode("PRIORITY")).toBe("priority")

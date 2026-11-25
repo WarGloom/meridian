@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { checkParameters } from "./connection"
 import { getMaxPriorityAssignmentsLimit, getMaxStoredSessionsLimit } from "../../sessionStore"
-import { UUID_PATTERN } from "./legacyCodec"
+import { UUID_PATTERN, agyAssignmentGeneration, agyAssignmentKey, isAgyAssignmentKey, isAgyAssignmentMarker,
+  decodeAgyPriorityAssignment, validatePriorityAssignment } from "./legacyCodec"
 import type { DurablePriorityAssignment } from "./legacyCodec"
 import { readMapping, readMappingGeneration, writeMappingRow } from "./mappings"
 import { readPriorityAssignment } from "./storePrioritySql"
 import { advanceStoreSlot, canonicalMapping, prepareStoreLocator, pruneMappings } from "./storeMutationSupport"
 import { withStoreWrite } from "./storeScope"
 import type { BookkeepingTransaction, CanonicalStoredSession } from "./types"
-import type { SharedSessionAndPriorityAssignmentOptions, SharedSessionAndPriorityAssignmentResult } from "./storeTypes"
+import type { PriorityPublicationOptions, SharedSessionAndPriorityAssignmentOptions, SharedSessionAndPriorityAssignmentResult } from "./storeTypes"
 
 export function writeAssignment(tx: BookkeepingTransaction, route: string, row: DurablePriorityAssignment): void {
   tx.run(`INSERT INTO priority_assignments VALUES(?,?,?,?,?,?,?,?,
@@ -55,55 +56,69 @@ function pruneRoutes(tx: BookkeepingTransaction, route: string): boolean {
 }
 
 export function storeSharedSessionAndPriorityAssignment(directory: string,
-  options: SharedSessionAndPriorityAssignmentOptions): SharedSessionAndPriorityAssignmentResult | false {
-  checkParameters([options.key, options.claudeSessionId, options.lineageHash, options.expectedMappingGeneration,
-    options.rollbackMappingKey ?? null, options.attemptOwnerToken ?? null, options.priority.routeKey,
-    options.priority.profileId, options.priority.lastHumanTurnDigest, options.priority.expectedAssignmentGeneration])
-  validate(options)
-  const current = prepareStoreLocator(directory, options.currentTranscript, options.claudeSessionId)
-  const source = prepareStoreLocator(directory, options.sourceTranscript, undefined, "sourceTranscript")
+  options: PriorityPublicationOptions): SharedSessionAndPriorityAssignmentResult | false {
+  const agy = "modelSlug" in options
+  if (agy ? !UUID_PATTERN.test(options.attemptOwnerToken) || options.key !== agyAssignmentKey(options.priority.routeKey, options.modelSlug)
+    : isAgyAssignmentKey(options.key)) return false
+  checkParameters([options.key, options.attemptOwnerToken ?? null, options.priority.routeKey,
+    options.priority.profileId, options.priority.lastHumanTurnDigest, options.priority.expectedAssignmentGeneration,
+    ...(agy ? [] : [options.claudeSessionId, options.lineageHash, options.expectedMappingGeneration, options.rollbackMappingKey ?? null])])
+  if (!agy) validate(options)
+  const current = agy ? undefined : prepareStoreLocator(directory, options.currentTranscript, options.claudeSessionId)
+  const source = agy ? undefined : prepareStoreLocator(directory, options.sourceTranscript, undefined, "sourceTranscript")
   return withStoreWrite(directory, (tx) => {
     const key = options.key, route = options.priority.routeKey
     const actual = readMappingGeneration(tx, key)
-    if (actual !== options.expectedMappingGeneration) return false
+    if (agy ? readMapping(tx, key) !== undefined : actual !== options.expectedMappingGeneration) return false
     const markers = tx.all("SELECT * FROM priority_rollbacks WHERE mapping_key=?", key)
-    if (markers.some((row) => row.route_key !== route || row.mapping_generation !== actual)) return false
+    if (markers.some(row => row.route_key !== route || (agy
+      ? !isAgyAssignmentMarker(route, { mappingKey: key, mappingGeneration: String(row.mapping_generation) })
+      : row.mapping_generation !== actual))) return false
     const lookup = readPriorityAssignment(tx, route)
     if (lookup.status === "error") throw lookup.error
     if (lookup.generation !== options.priority.expectedAssignmentGeneration) return false
     if (options.attemptOwnerToken !== undefined
       ? lookup.attempt?.ownerToken !== options.attemptOwnerToken : !!lookup.attempt) return false
     const existingAssignment = lookup.status === "found" ? lookup.assignment : undefined
-    const raw = readMapping(tx, key)
+    let mappingGeneration = agy ? agyAssignmentGeneration(key) : actual
+    const raw = agy ? undefined : readMapping(tx, key)
     const existing = raw ? canonicalMapping(tx, key, raw) : undefined
-    const changed = existing !== undefined && existing.claudeSessionId !== options.claudeSessionId
-    if (source && (!changed || source.sessionId !== existing?.claudeSessionId))
-      throw new Error("sourceTranscript.sessionId must match the replaced claudeSessionId")
-    const stored: CanonicalStoredSession = {
-      claudeSessionId: options.claudeSessionId, revision: (existing?.revision ?? 0) + 1,
-      generationId: randomUUID(), createdAt: existing?.createdAt || Date.now(), lastUsedAt: Date.now(),
-      messageCount: options.messageCount, lineageHash: options.lineageHash, messageHashes: options.messageHashes,
-      clientLineageHash: options.clientLineageHash, resumeContextHash: options.resumeContextHash,
-      messageBlockHashes: options.messageBlockHashes, sdkMessageUuids: options.sdkMessageUuids,
-      passthroughToolCallAssistantUuid: options.passthroughToolCallAssistantUuid ?? undefined,
-      passthroughToolCallIds: options.passthroughToolCallIds ?? undefined, contextUsage: options.contextUsage,
-      currentTranscript: changed ? current : existing?.currentTranscript ?? current,
-      previousTranscript: changed ? existing?.currentTranscript ?? source : existing?.previousTranscript,
-      previousClaudeSessionId: changed ? existing.claudeSessionId : existing?.previousClaudeSessionId,
+    if (!agy) {
+      const changed = existing !== undefined && existing.claudeSessionId !== options.claudeSessionId
+      if (source && (!changed || source.sessionId !== existing?.claudeSessionId))
+        throw new Error("sourceTranscript.sessionId must match the replaced claudeSessionId")
+      const stored: CanonicalStoredSession = {
+        claudeSessionId: options.claudeSessionId, revision: (existing?.revision ?? 0) + 1,
+        generationId: randomUUID(), createdAt: existing?.createdAt || Date.now(), lastUsedAt: Date.now(),
+        messageCount: options.messageCount, lineageHash: options.lineageHash, messageHashes: options.messageHashes,
+        clientLineageHash: options.clientLineageHash, resumeContextHash: options.resumeContextHash,
+        messageBlockHashes: options.messageBlockHashes, sdkMessageUuids: options.sdkMessageUuids,
+        passthroughToolCallAssistantUuid: options.passthroughToolCallAssistantUuid ?? undefined,
+        passthroughToolCallIds: options.passthroughToolCallIds ?? undefined, contextUsage: options.contextUsage,
+        currentTranscript: changed ? current : existing?.currentTranscript ?? current,
+        previousTranscript: changed ? existing?.currentTranscript ?? source : existing?.previousTranscript,
+        previousClaudeSessionId: changed ? existing.claudeSessionId : existing?.previousClaudeSessionId,
+      }
+      writeMappingRow(tx, key, stored, true)
+      mappingGeneration = readMappingGeneration(tx, key)
     }
-    writeMappingRow(tx, key, stored, true)
-    const mappingGeneration = readMappingGeneration(tx, key)
     tx.run("UPDATE schema_meta SET store_meta_version=3")
     const assignment: DurablePriorityAssignment = { profileId: options.priority.profileId,
       lastHumanTurnDigest: options.priority.lastHumanTurnDigest, lastHumanTurnIssuedAt: options.priority.lastHumanTurnIssuedAt,
       mappingKey: key, mappingGeneration, generationId: randomUUID(), updatedAt: Date.now() }
+    if (agy && !decodeAgyPriorityAssignment(route, validatePriorityAssignment(route, assignment))) return false
     writeAssignment(tx, route, assignment)
     const existingRollback = tx.get("SELECT * FROM priority_rollbacks WHERE route_key=?", route)
-    const rollbackKey = options.rollbackMappingKey ?? existingAssignment?.mappingKey
+    const rollbackKey = (agy ? undefined : options.rollbackMappingKey) ?? existingAssignment?.mappingKey
     if (rollbackKey && rollbackKey !== key) {
-      if (!tx.get("SELECT key FROM mappings WHERE key=?", rollbackKey))
-        throw new Error("priority rollback mapping disappeared before publication")
-      const rollbackGeneration = readMappingGeneration(tx, rollbackKey)
+      const proof = existingRollback?.mapping_key === rollbackKey
+        ? { mappingKey: rollbackKey, mappingGeneration: String(existingRollback.mapping_generation) }
+        : existingAssignment
+      const placeholder = proof?.mappingKey === rollbackKey && isAgyAssignmentMarker(route, proof)
+      const hasMapping = Boolean(tx.get("SELECT key FROM mappings WHERE key=?", rollbackKey))
+      if (placeholder && hasMapping) return false
+      if (!hasMapping && !placeholder) throw new Error("priority rollback mapping disappeared before publication")
+      const rollbackGeneration = placeholder ? proof.mappingGeneration : readMappingGeneration(tx, rollbackKey)
       if (existingAssignment?.mappingKey === rollbackKey && existingAssignment.mappingGeneration !== rollbackGeneration)
         return false
       if (existingRollback?.mapping_key !== rollbackKey)

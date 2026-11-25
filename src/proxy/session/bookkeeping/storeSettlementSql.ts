@@ -10,16 +10,21 @@ import { withStoreWrite } from "./storeScope"
 import type { FinalizeSharedSessionAndPriorityAssignmentOptions, RollbackSharedSessionAndPriorityAssignmentOptions,
   RollbackSharedSessionAndPriorityAssignmentResult } from "./storeTypes"
 import type { CanonicalStoredSession } from "./types"
-import type { DurablePriorityAssignment } from "./legacyCodec"
+import { decodeAgyPriorityAssignment, isAgyAssignmentKey, type DurablePriorityAssignment } from "./legacyCodec"
 
 export function finalizeSharedSessionAndPriorityAssignment(directory: string,
   options: FinalizeSharedSessionAndPriorityAssignmentOptions): boolean {
   checkParameters([options.key, options.routeKey, options.expectedMappingGeneration,
     options.expectedAssignmentGeneration, options.rollbackMappingKey ?? null, options.attemptOwnerToken ?? null])
   return withStoreWrite(directory, (tx) => {
-    if (readMappingGeneration(tx, options.key) !== options.expectedMappingGeneration) return false
     const lookup = readPriorityAssignment(tx, options.routeKey)
     if (lookup.status !== "found" || lookup.generation !== options.expectedAssignmentGeneration) return false
+    if (isAgyAssignmentKey(options.key)) {
+      if (!options.attemptOwnerToken || lookup.assignment.mappingKey !== options.key
+        || lookup.assignment.mappingGeneration !== options.expectedMappingGeneration
+        || !decodeAgyPriorityAssignment(options.routeKey, lookup.assignment)
+        || tx.get("SELECT key FROM mappings WHERE key=?", options.key)) return false
+    } else if (readMappingGeneration(tx, options.key) !== options.expectedMappingGeneration) return false
     const rollback = tx.get("SELECT mapping_key FROM priority_rollbacks WHERE route_key=?", options.routeKey)
     if (rollback?.mapping_key !== options.rollbackMappingKey) return false
     if (options.attemptOwnerToken !== undefined
@@ -45,9 +50,15 @@ export function rollbackSharedSessionAndPriorityAssignment(directory: string,
   const prior = prepareStoreLocator(directory, previous?.previousTranscript)
   return withStoreWrite(directory, (tx) => {
     if (tx.get("SELECT store_meta_version FROM schema_meta")?.store_meta_version !== 3) return false
-    if (readMappingGeneration(tx, options.key) !== options.expectedMappingGeneration) return false
     const lookup = readPriorityAssignment(tx, options.routeKey)
     if (lookup.status === "error") throw lookup.error
+    const agy = isAgyAssignmentKey(options.key)
+    if (agy) {
+      if (previous || !options.attemptOwnerToken || lookup.status !== "found" || lookup.assignment.mappingKey !== options.key
+        || lookup.assignment.mappingGeneration !== options.expectedMappingGeneration
+        || !decodeAgyPriorityAssignment(options.routeKey, lookup.assignment)
+        || tx.get("SELECT key FROM mappings WHERE key=?", options.key)) return false
+    } else if (readMappingGeneration(tx, options.key) !== options.expectedMappingGeneration) return false
     if (lookup.generation !== options.expectedAssignmentGeneration) return false
     if (options.attemptOwnerToken !== undefined
       ? lookup.attempt?.ownerToken !== options.attemptOwnerToken : !!lookup.attempt) return false
@@ -56,16 +67,18 @@ export function rollbackSharedSessionAndPriorityAssignment(directory: string,
     const actual = tx.get("SELECT * FROM priority_rollbacks WHERE route_key=?", options.routeKey)
     if (actual?.mapping_key !== expected?.mappingKey || actual?.mapping_generation !== expected?.mappingGeneration) return false
     let restoredMapping: CanonicalStoredSession | null = null
-    if (previous) {
+    if (!agy && previous) {
       restoredMapping = { ...previous, revision: (previous.revision ?? 0) + 1, generationId: randomUUID(),
         currentTranscript: current ? persistedCanonicalLocator(current) : undefined,
         previousTranscript: prior ? persistedCanonicalLocator(prior) : undefined }
       writeMappingRow(tx, options.key, restoredMapping, true)
-    } else {
+    } else if (!agy) {
       tx.run("DELETE FROM mappings WHERE key=?", options.key)
       advanceStoreSlot(tx, options.key)
     }
-    const mappingGeneration = readMappingGeneration(tx, options.key)
+    const mappingGeneration = agy
+      ? options.previousAssignment?.mappingKey === options.key ? options.previousAssignment.mappingGeneration : options.expectedMappingGeneration
+      : readMappingGeneration(tx, options.key)
     let restoredAssignment: DurablePriorityAssignment | null = null
     if (options.previousAssignment) {
       restoredAssignment = { ...structuredClone(options.previousAssignment),

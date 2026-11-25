@@ -4,6 +4,7 @@ import { lookupPriorityAssignmentResult } from "./storePrioritySql"
 import { readSessionStoreSnapshot, readSessionStoreGenerationSnapshot, readSessionTranscriptPins,
   lookupSessionRecovery, listStoredSessions } from "./storeMaintenanceSql"
 import { storeSharedSession } from "./storeWriteSql"
+import { isAgyAssignmentKey } from "./legacyCodec"
 import { claimPriorityAttempt, releasePriorityAttempt, blockPriorityAttempt } from "./storeAttemptsSql"
 import { storeSharedSessionAndPriorityAssignment } from "./storePublicationSql"
 import { finalizeSharedSessionAndPriorityAssignment, rollbackSharedSessionAndPriorityAssignment } from "./storeSettlementSql"
@@ -14,7 +15,8 @@ import { listSupersededProfileConversations, pruneSupersededProfileCopies } from
 export const sqliteSessionStoreBackend: SessionStoreBackend = {
   lookupSharedSessionResult, lookupSharedSessionByClaudeIdResult, lookupPriorityAssignmentResult,
   readSessionStoreSnapshot, readSessionStoreGenerationSnapshot, readSessionTranscriptPins,
-  lookupSessionRecovery, listStoredSessions, storeSharedSession,
+  lookupSessionRecovery, listStoredSessions,
+  storeSharedSession: (directory, ...args) => isAgyAssignmentKey(args[0]) ? false : storeSharedSession(directory, ...args),
   claimPriorityAttempt, releasePriorityAttempt, blockPriorityAttempt,
   storeSharedSessionAndPriorityAssignment, finalizeSharedSessionAndPriorityAssignment,
   rollbackSharedSessionAndPriorityAssignment, attachSharedTranscriptLocator, evictSharedSession, clearSharedSessions,

@@ -1,12 +1,14 @@
 import {
   STORE_META_KEY, STORE_META_VERSION, PRIORITY_STORE_META_VERSION, keyDigest, getStoredSessionGeneration,
   UUID_PATTERN, emptyStoreDocument, parseStoreDocument, serializeLegacyStore,
+  agyAssignmentKey, agyAssignmentGeneration, isAgyAssignmentKey, isAgyAssignmentMarker, decodeAgyPriorityAssignment,
+  validatePriorityAssignment,
 } from "./session/bookkeeping/legacyCodec"
 import type {
   StoredSessionGeneration, DurablePriorityAssignment, PriorityAssignmentGeneration,
   SessionStoreMeta, SessionStoreDocument,
 } from "./session/bookkeeping/legacyCodec"
-export { getStoredSessionGeneration, parseStoreDocument, serializeLegacyStore } from "./session/bookkeeping/legacyCodec"
+export { getStoredSessionGeneration, parseStoreDocument, serializeLegacyStore, decodeAgyPriorityAssignment } from "./session/bookkeeping/legacyCodec"
 export type {
   StoredSessionGeneration, DurablePriorityAssignment, PriorityAssignmentGeneration, DurablePriorityAttempt,
 } from "./session/bookkeeping/legacyCodec"
@@ -70,6 +72,7 @@ import {
 
 import type { TranscriptLocator, StoredSession } from "./session/bookkeeping/types"
 export type { TranscriptLocator, StoredSession } from "./session/bookkeeping/types"
+import { AGY_ACCOUNT_ID } from "./routing"
 import { activeStoreBackend } from "./session/bookkeeping/storeBackend"
 import { selectProfileCopies, type ProfileCopyPruneOptions } from "./session/bookkeeping/profileCopies"
 export type { ProfileCopyPruneOptions } from "./session/bookkeeping/profileCopies"
@@ -80,7 +83,7 @@ import type {
   SharedSessionLookupResult, PriorityAssignmentLookupResult, PriorityAttemptTurn, PriorityAttemptClaim,
   SharedSessionAndPriorityAssignmentOptions, SharedSessionAndPriorityAssignmentResult,
   FinalizeSharedSessionAndPriorityAssignmentOptions, RollbackSharedSessionAndPriorityAssignmentOptions,
-  RollbackSharedSessionAndPriorityAssignmentResult,
+  RollbackSharedSessionAndPriorityAssignmentResult, AgyPriorityAssignmentOptions, PriorityPublicationOptions,
 } from "./session/bookkeeping/storeTypes"
 export type {
   SharedSessionLookupResult, PriorityAssignmentLookupResult, PriorityAttemptTurn, PriorityAttemptClaim,
@@ -1161,6 +1164,7 @@ export function storeSharedSession(
   resumeContextHash?: string | null,
   beforePublish?: () => void,
 ): StoredSessionGeneration | false | Promise<StoredSessionGeneration | false> {
+  if (isAgyAssignmentKey(key)) return false
   const backend = activeStoreBackend()
   if (backend) {
     beforePublish?.()
@@ -1477,25 +1481,43 @@ export function storeSharedSessionAndPriorityAssignment(
   options: SharedSessionAndPriorityAssignmentOptions,
   beforePublish?: () => void,
 ): SharedSessionAndPriorityAssignmentResult | false | Promise<SharedSessionAndPriorityAssignmentResult | false> {
+  return storePriorityPublication(options, beforePublish)
+}
+
+export function storeAgyPriorityAssignment(options: AgyPriorityAssignmentOptions, beforePublish?: () => void) {
+  const key = agyAssignmentKey(options.priority.routeKey, options.modelSlug)
+  const result = storePriorityPublication({ ...options, key, priority: { ...options.priority, profileId: AGY_ACCOUNT_ID } }, beforePublish)
+  const withKey = (value: SharedSessionAndPriorityAssignmentResult | false):
+    (SharedSessionAndPriorityAssignmentResult & { readonly key: string }) | false => value ? { ...value, key } : false
+  return result instanceof Promise ? result.then(withKey) : withKey(result)
+}
+
+function storePriorityPublication(input: PriorityPublicationOptions, beforePublish?: () => void):
+  SharedSessionAndPriorityAssignmentResult | false | Promise<SharedSessionAndPriorityAssignmentResult | false> {
+  if (!("modelSlug" in input) && isAgyAssignmentKey(input.key)) return false
   const backend = activeStoreBackend()
   if (backend) {
     beforePublish?.()
-    return backend.storeSharedSessionAndPriorityAssignment(getSessionStoreDir(), options)
+    return backend.storeSharedSessionAndPriorityAssignment(getSessionStoreDir(), input)
   }
   return (async () => {
-    options = structuredClone(options)
-    validatePriorityPublicationInput(options)
+    const options = structuredClone(input)
+    const agy = "modelSlug" in options
+    if (!agy) validatePriorityPublicationInput(options)
+    if (agy && !UUID_PATTERN.test(options.attemptOwnerToken)) return false
     let result: SharedSessionAndPriorityAssignmentResult | false = false
     return mutateStore((document) => {
       const existing = document.sessions[options.key]
       const actualMappingGeneration = keyGeneration(options.key, existing, document.meta)
-      if (actualMappingGeneration !== options.expectedMappingGeneration) return false
+      if (agy ? existing !== undefined : actualMappingGeneration !== options.expectedMappingGeneration) return false
       if (document.meta.version === PRIORITY_STORE_META_VERSION) {
         const markerOwners = Object.entries(document.meta.priorityRollbackMappings)
           .filter(([, rollback]) => rollback.mappingKey === options.key)
         if (markerOwners.some(([routeKey]) => routeKey !== options.priority.routeKey)) return false
         const ownMarker = document.meta.priorityRollbackMappings[options.priority.routeKey]
-        if (ownMarker?.mappingKey === options.key && ownMarker.mappingGeneration !== actualMappingGeneration) return false
+        if (ownMarker?.mappingKey === options.key && (agy
+          ? !isAgyAssignmentMarker(options.priority.routeKey, ownMarker)
+          : ownMarker.mappingGeneration !== actualMappingGeneration)) return false
       }
 
       const existingAssignments = document.meta.version === PRIORITY_STORE_META_VERSION
@@ -1518,43 +1540,46 @@ export function storeSharedSessionAndPriorityAssignment(
         return false
       }
 
-      const sessionIdChanged = existing !== undefined && existing.claudeSessionId !== options.claudeSessionId
-      if (options.sourceTranscript !== undefined) {
-        if (!sessionIdChanged || options.sourceTranscript.sessionId !== existing?.claudeSessionId) {
-          throw new Error("sourceTranscript.sessionId must match the replaced claudeSessionId")
+      let mappingGeneration = agy ? agyAssignmentGeneration(options.key) : actualMappingGeneration
+      if (!agy) {
+        const sessionIdChanged = existing !== undefined && existing.claudeSessionId !== options.claudeSessionId
+        if (options.sourceTranscript !== undefined) {
+          if (!sessionIdChanged || options.sourceTranscript.sessionId !== existing?.claudeSessionId) {
+            throw new Error("sourceTranscript.sessionId must match the replaced claudeSessionId")
+          }
         }
+        const previousClaudeSessionId = sessionIdChanged
+          ? existing.claudeSessionId
+          : existing?.previousClaudeSessionId
+        const resolvedCurrentTranscript = sessionIdChanged
+          ? options.currentTranscript
+          : existing?.currentTranscript ?? options.currentTranscript
+        const previousTranscript = sessionIdChanged
+          ? existing?.currentTranscript ?? options.sourceTranscript
+          : existing?.previousTranscript
+        const stored: StoredSession = {
+          claudeSessionId: options.claudeSessionId,
+          revision: (existing?.revision ?? 0) + 1,
+          generationId: randomUUID(),
+          createdAt: existing?.createdAt || Date.now(),
+          lastUsedAt: Date.now(),
+          messageCount: options.messageCount,
+          lineageHash: options.lineageHash,
+          clientLineageHash: options.clientLineageHash,
+          resumeContextHash: options.resumeContextHash,
+          messageHashes: options.messageHashes,
+          messageBlockHashes: options.messageBlockHashes,
+          sdkMessageUuids: options.sdkMessageUuids,
+          passthroughToolCallAssistantUuid: options.passthroughToolCallAssistantUuid ?? undefined,
+          passthroughToolCallIds: options.passthroughToolCallIds ?? undefined,
+          contextUsage: options.contextUsage,
+          ...(resolvedCurrentTranscript ? { currentTranscript: { ...resolvedCurrentTranscript } } : {}),
+          ...(previousTranscript ? { previousTranscript: { ...previousTranscript } } : {}),
+          ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),
+        }
+        document.sessions[options.key] = stored
+        mappingGeneration = getStoredSessionGeneration(stored, options.key)
       }
-      const previousClaudeSessionId = sessionIdChanged
-        ? existing.claudeSessionId
-        : existing?.previousClaudeSessionId
-      const resolvedCurrentTranscript = sessionIdChanged
-        ? options.currentTranscript
-        : existing?.currentTranscript ?? options.currentTranscript
-      const previousTranscript = sessionIdChanged
-        ? existing?.currentTranscript ?? options.sourceTranscript
-        : existing?.previousTranscript
-      const stored: StoredSession = {
-        claudeSessionId: options.claudeSessionId,
-        revision: (existing?.revision ?? 0) + 1,
-        generationId: randomUUID(),
-        createdAt: existing?.createdAt || Date.now(),
-        lastUsedAt: Date.now(),
-        messageCount: options.messageCount,
-        lineageHash: options.lineageHash,
-        clientLineageHash: options.clientLineageHash,
-        resumeContextHash: options.resumeContextHash,
-        messageHashes: options.messageHashes,
-        messageBlockHashes: options.messageBlockHashes,
-        sdkMessageUuids: options.sdkMessageUuids,
-        passthroughToolCallAssistantUuid: options.passthroughToolCallAssistantUuid ?? undefined,
-        passthroughToolCallIds: options.passthroughToolCallIds ?? undefined,
-        contextUsage: options.contextUsage,
-        ...(resolvedCurrentTranscript ? { currentTranscript: { ...resolvedCurrentTranscript } } : {}),
-        ...(previousTranscript ? { previousTranscript: { ...previousTranscript } } : {}),
-        ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),
-      }
-      document.sessions[options.key] = stored
-      const mappingGeneration = getStoredSessionGeneration(stored, options.key)
 
       if (document.meta.version === STORE_META_VERSION) {
         document.meta = {
@@ -1574,17 +1599,21 @@ export function storeSharedSessionAndPriorityAssignment(
         generationId: randomUUID(),
         updatedAt: Date.now(),
       }
+      if (agy && !decodeAgyPriorityAssignment(options.priority.routeKey, validatePriorityAssignment(options.priority.routeKey, assignment))) return false
       const priorityAssignments = document.meta.priorityAssignments
       const priorityRollbackMappings = document.meta.priorityRollbackMappings
       priorityAssignments[options.priority.routeKey] = assignment
       const existingRollback = priorityRollbackMappings[options.priority.routeKey]
-      const rollbackMappingKey = options.rollbackMappingKey ?? existingAssignment?.mappingKey
+      const rollbackMappingKey = (agy ? undefined : options.rollbackMappingKey) ?? existingAssignment?.mappingKey
       if (rollbackMappingKey && rollbackMappingKey !== options.key) {
         const rollbackMapping = document.sessions[rollbackMappingKey]
-        if (!rollbackMapping) {
-          throw new Error("priority rollback mapping disappeared before publication")
-        }
-        const rollbackMappingGeneration = getStoredSessionGeneration(rollbackMapping, rollbackMappingKey)
+        const proof = existingRollback?.mappingKey === rollbackMappingKey ? existingRollback : existingAssignment
+        const placeholder = proof?.mappingKey === rollbackMappingKey && isAgyAssignmentMarker(options.priority.routeKey, proof)
+        if (placeholder && rollbackMapping) return false
+        if (!rollbackMapping && !placeholder) throw new Error("priority rollback mapping disappeared before publication")
+        const rollbackMappingGeneration = placeholder ? proof.mappingGeneration
+          : rollbackMapping && getStoredSessionGeneration(rollbackMapping, rollbackMappingKey)
+        if (rollbackMappingGeneration === undefined) return false
         if (
           existingAssignment?.mappingKey === rollbackMappingKey
           && existingAssignment.mappingGeneration !== rollbackMappingGeneration
@@ -1677,8 +1706,12 @@ export function finalizeSharedSessionAndPriorityAssignment(
     return mutateStore((document) => {
       if (document.meta.version !== PRIORITY_STORE_META_VERSION) return false
       const mapping = document.sessions[options.key]
-      if (keyGeneration(options.key, mapping, document.meta) !== options.expectedMappingGeneration) return false
       const assignment = document.meta.priorityAssignments[options.routeKey]
+      if (isAgyAssignmentKey(options.key)) {
+        if (mapping || !options.attemptOwnerToken || assignment?.mappingKey !== options.key
+          || assignment.mappingGeneration !== options.expectedMappingGeneration
+          || !decodeAgyPriorityAssignment(options.routeKey, assignment)) return false
+      } else if (keyGeneration(options.key, mapping, document.meta) !== options.expectedMappingGeneration) return false
       if (
         !assignment
         || priorityAssignmentGeneration(options.routeKey, assignment, document.meta)
@@ -1735,8 +1768,13 @@ export function rollbackSharedSessionAndPriorityAssignment(
     return mutateStore((document) => {
       if (document.meta.version !== PRIORITY_STORE_META_VERSION) return false
       const currentMapping = document.sessions[options.key]
-      if (keyGeneration(options.key, currentMapping, document.meta) !== options.expectedMappingGeneration) return false
       const currentAssignment = document.meta.priorityAssignments[options.routeKey]
+      const agy = isAgyAssignmentKey(options.key)
+      if (agy) {
+        if (currentMapping || options.previousMapping || !options.attemptOwnerToken || currentAssignment?.mappingKey !== options.key
+          || currentAssignment.mappingGeneration !== options.expectedMappingGeneration
+          || !decodeAgyPriorityAssignment(options.routeKey, currentAssignment)) return false
+      } else if (keyGeneration(options.key, currentMapping, document.meta) !== options.expectedMappingGeneration) return false
       if (
         priorityAssignmentGeneration(options.routeKey, currentAssignment, document.meta)
         !== options.expectedAssignmentGeneration
@@ -1759,18 +1797,20 @@ export function rollbackSharedSessionAndPriorityAssignment(
       ) return false
 
       let restoredMapping: StoredSession | null = null
-      if (options.previousMapping) {
+      if (!agy && options.previousMapping) {
         restoredMapping = {
           ...structuredClone(options.previousMapping),
           revision: (options.previousMapping.revision ?? 0) + 1,
           generationId: randomUUID(),
         }
         document.sessions[options.key] = restoredMapping
-      } else {
+      } else if (!agy) {
         delete document.sessions[options.key]
         advanceKeySlot(options.key, document.meta)
       }
-      const mappingGeneration = keyGeneration(options.key, restoredMapping ?? undefined, document.meta)
+      const mappingGeneration = agy
+        ? options.previousAssignment?.mappingKey === options.key ? options.previousAssignment.mappingGeneration : options.expectedMappingGeneration
+        : keyGeneration(options.key, restoredMapping ?? undefined, document.meta)
 
       let restoredAssignment: DurablePriorityAssignment | null = null
       if (options.previousAssignment) {
