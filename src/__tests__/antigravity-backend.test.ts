@@ -529,14 +529,16 @@ describe.skipIf(process.platform === "win32")("Antigravity HTTP/CLI integration"
     expect(runtime.preparing).toBe(0)
     expect(runtime.runs.size).toBe(0)
   })
-  it("keeps all CLI quota buckets when a reset time is absent", async () => {
+  it("keeps all CLI quota buckets with absent, epoch-zero, and real reset times", async () => {
     const { runtime } = fixture()
-    runtime.childEnv.AGY_FIXTURE_QUOTA = "missing"
+    runtime.childEnv.AGY_FIXTURE_QUOTA = "mixed"
     const quota = await runtime.accountQuota()
     expect(quota.error).toBeUndefined()
     expect(quota.windows).toEqual([
       { type: "gemini-5h", group: "Gemini Models", utilization: 0.25, resetsAt: 4070908800000 },
       { type: "gemini-weekly", group: "Gemini Models", utilization: 0.125, resetsAt: null },
+      { type: "3p-5h", group: "Claude/GPT", utilization: 0, resetsAt: null },
+      { type: "3p-weekly", group: "Claude/GPT", utilization: 0.5, resetsAt: 1577836800000 },
     ])
   })
 

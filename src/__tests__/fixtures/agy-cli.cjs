@@ -64,7 +64,12 @@ async function main(inputPrompt) {
   if (prompt === '/usage') {
     const buckets = [{ id: 'gemini-5h', window: '5h', remaining_fraction: 0.75, reset_time: '2099-01-01T00:00:00Z' }]
     if (process.env.AGY_FIXTURE_QUOTA) buckets.push({ id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.875, reset_time: process.env.AGY_FIXTURE_QUOTA === 'malformed' ? 'not a date' : undefined })
-    return emit({ command: { data: { groups: [{ name: 'Gemini Models', buckets }] } } })
+    const groups = [{ name: 'Gemini Models', buckets }]
+    if (process.env.AGY_FIXTURE_QUOTA === 'mixed') groups.push({ name: 'Claude/GPT', buckets: [
+      { id: '3p-5h', window: '5h', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' },
+      { id: '3p-weekly', window: 'weekly', remaining_fraction: 0.5, reset_time: '2020-01-01T00:00:00Z' },
+    ] })
+    return emit({ command: { data: { groups } } })
   }
   if (prompt.includes('POLICY_PROBE')) {
     const check = (input, decision) => {

@@ -55,9 +55,10 @@ provider service*; public routes and headers are in
 
 ### Quota reset times
 
-A bucket in `agy /usage` may omit `reset_time`. Meridian keeps the bucket and
-its utilization and reports `resetsAt: null` (unknown). A supplied reset time
-must be a parseable date; malformed values still fail the quota refresh.
+A bucket in `agy /usage` may omit `reset_time` or use Unix epoch zero as an unknown
+reset sentinel. In both cases Meridian keeps the bucket and its utilization
+and reports `resetsAt: null`. Other valid dates keep their timestamps, even if elapsed.
+A supplied reset time must be a parseable date; malformed values still fail the quota refresh.
 All other required fields stay required. Quota snapshots do not drive pool
 cooldowns.
 

@@ -720,7 +720,10 @@ export class AntigravityRuntime {
         await this.verifyAccount()
         const result = await exec(this.executable, ["-p", "/usage", "--output-format", "json"], { env: this.childEnv, timeout: 20_000, maxBuffer: 1024 * 1024, signal: this.shutdown.signal })
         const groups = quotaSchema.parse(JSON.parse(result.stdout)).command.data.groups
-        const windows = groups.flatMap(group => group.buckets.map(bucket => ({ type: bucket.id, group: group.name, utilization: 1 - bucket.remaining_fraction, resetsAt: bucket.reset_time === undefined ? null : Date.parse(bucket.reset_time) })))
+        const windows = groups.flatMap(group => group.buckets.map(bucket => {
+          const reset = bucket.reset_time === undefined ? null : Date.parse(bucket.reset_time)
+          return { type: bucket.id, group: group.name, utilization: 1 - bucket.remaining_fraction, resetsAt: reset === 0 ? null : reset }
+        }))
         if (windows.some(window => window.resetsAt !== null && !Number.isFinite(window.resetsAt))) throw new Error("CLI returned an invalid quota reset time")
         this.quota = { fetchedAt: Date.now(), windows }
       } catch (error) { this.quota = { ...this.quota, error: error instanceof Error ? error.message : String(error) } }
