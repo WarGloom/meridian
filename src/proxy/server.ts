@@ -503,6 +503,7 @@ interface HandleMessagesOptions {
    */
   requestAbortLink?: RequestAbortLink
   forceFreshPriorityReplay?: boolean
+  readonly replayStandaloneAgy?: boolean
   priorityPublication?: PrioritySessionPublication
   priorityAttemptExposure?: PriorityAttemptExposure
 }
@@ -805,6 +806,7 @@ type PriorityDispatchOptions = {
   readonly requestMeta: RequestMeta
   readonly candidateIds: readonly string[]
   readonly agy?: { readonly slug: AgyClaudeModelSlug; run(lifecycle: AgPoolLifecycle): Promise<Response> }
+  readonly replayStandaloneAgy?: boolean
   readonly earliestReset?: number
   readonly sessionKey: string | null
   readonly wantsStream: boolean
@@ -2116,6 +2118,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       forcedProfileId: candidate,
       turnWatchdogSignal: options.turnWatchdogSignal,
       requestAbortLink,
+      replayStandaloneAgy: options.replayStandaloneAgy,
       forceFreshPriorityReplay: priorityPublication !== undefined
         && (options.durableRoute?.forceFreshReplay === true
           || (options.currentProfileId !== undefined && candidate !== options.currentProfileId)),
@@ -3071,16 +3074,17 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         // Priority mode (opt-in): unpinned requests are dispatched across the
         const pin = c.req.header("x-meridian-profile")
         const messages: readonly unknown[] = body.messages
-        const tail = messages.slice(messages.findLastIndex(m => m !== null && typeof m === "object" && "role" in m && m.role === "assistant") + 1)
-        const resultIds = tail.flatMap(message => {
+        const lastAssistantIndex = messages.findLastIndex(m => m !== null && typeof m === "object" && "role" in m && m.role === "assistant")
+        const tailResultIds = messages.slice(lastAssistantIndex + 1).flatMap(message => {
           if (!message || typeof message !== "object" || !("content" in message) || !Array.isArray(message.content)) return []
           const content: readonly unknown[] = message.content
           return content.flatMap(block => block && typeof block === "object" && "type" in block && block.type === "tool_result"
-            && "tool_use_id" in block && typeof block.tool_use_id === "string" ? [block.tool_use_id] : [])
+            ? ["tool_use_id" in block && typeof block.tool_use_id === "string" ? block.tool_use_id : undefined] : [])
         })
-        const agyResults = resultIds.some(id => id.startsWith("toolu_agy_"))
-        const agyConflict = () => c.json({ type: "error", error: { type: "invalid_request_error", message: "Antigravity tool results require their original priority owner" } }, 409)
-        if (agyResults && (!isPoolRouting(routingMode) || options.forcedProfileId || pin || !adapterSessionId
+        const resultIds = tailResultIds.filter(id => id !== undefined)
+        const agyResults = !options.replayStandaloneAgy && resultIds.some(id => id.startsWith("toolu_agy_"))
+        const agyConflict = () => c.json({ type: "error", error: { type: "invalid_request_error", message: "Antigravity tool results require their original priority owner" } }, 409, { "x-should-retry": "false" })
+        if (agyResults && (!isPoolRouting(routingMode) || options.forcedProfileId || pin !== undefined || !adapterSessionId
           || resultIds.some(id => !id.startsWith("toolu_agy_")))) return agyConflict()
         const routeKey = adapterSessionId && !options.forcedProfileId ? adapter.name + ":" + adapterSessionId : undefined
         const combinedRoute = routeKey && antigravity ? lookupPriorityAssignmentResult(routeKey) : undefined
@@ -3100,10 +3104,21 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
             const stored = routeResult?.status === "found" ? routeResult.assignment : undefined
             const storedAgy = routeKey && stored ? decodeAgyPriorityAssignment(routeKey, stored) : undefined
             if (stored && isAgyAssignmentKey(stored.mappingKey) && !storedAgy) return agyConflict()
-            if ((storedAgy && routeResult?.attempt) || (agyResults && (!storedAgy || !antigravity))) return agyConflict()
+            const replayStandaloneAgy = agyResults && !storedAgy && routeResult !== undefined && !routeResult.attempt
+              && c.req.path === "/v1/messages" && tailResultIds.length === resultIds.length && (() => {
+                const assistant = messages[lastAssistantIndex]
+                if (!assistant || typeof assistant !== "object" || !("content" in assistant) || !Array.isArray(assistant.content)) return false
+                const content: readonly unknown[] = assistant.content
+                const callIds = content.flatMap(block => block && typeof block === "object" && "type" in block && block.type === "tool_use"
+                  ? ["id" in block && typeof block.id === "string" ? block.id : undefined] : [])
+                const returned = new Set(resultIds)
+                return returned.size === resultIds.length && callIds.length === resultIds.length
+                  && new Set(callIds).size === returned.size && callIds.every(id => id !== undefined && returned.has(id))
+              })()
+            if ((storedAgy && routeResult?.attempt) || (agyResults && !replayStandaloneAgy && (!storedAgy || !antigravity))) return agyConflict()
             const routeTurn = requestMeta.routingTurnIdentity
             const replayOnly = storedAgy !== undefined && !agyResults && (!routeTurn || routeTurn.turnId === stored?.lastHumanTurnDigest)
-            const agyRequired = agyResults || replayOnly
+            const agyRequired = (agyResults && !replayStandaloneAgy) || replayOnly
             const adapterBase = adapter.baseName ?? adapter.name
             const effort = readClientEffort({ header: adapterBase === "polytoken" ? undefined : c.req.header("x-opencode-effort"),
               body, currentSystemOverride: true })
@@ -3352,6 +3367,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
                 requestMeta,
                 candidateIds: candidates,
                 agy,
+                replayStandaloneAgy,
                 earliestReset: agy && openings.length ? Math.min(...openings) : undefined,
                 sessionKey,
                 wantsStream: body.stream === true,
@@ -4261,7 +4277,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
         ) {
           lineageResult = { type: "diverged", reason: "concurrent-race" }
         }
-        if (options.forceFreshPriorityReplay || combinedAgy) {
+        if (options.forceFreshPriorityReplay || combinedAgy || options.replayStandaloneAgy) {
           if (options.forceFreshPriorityReplay && (!options.priorityPublication || !agentSessionId || !durableMappingKey)) {
             throw new Error("Fresh priority replay requires trusted keyed durable publication")
           }

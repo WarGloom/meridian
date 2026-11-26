@@ -613,6 +613,47 @@ describe("priority routing", () => {
     expect(capturedEnvs[0]).toContain("prof-work")
   })
 
+  it.each([
+    { batch: "complete", returned: ["toolu_agy_first", "toolu_agy_second"], status: 200 },
+    { batch: "incomplete", returned: ["toolu_agy_first"], status: 409 },
+    { batch: "mixed", returned: ["toolu_agy_first", "toolu_claude_second"], status: 409 },
+    { batch: "duplicate", returned: ["toolu_agy_first", "toolu_agy_second", "toolu_agy_first"], status: 409 },
+  ])("handles the $batch standalone agy batch on the Claude route", async ({ batch, returned, status }) => {
+    const server = createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
+      antigravity: { executable: fileURLToPath(new URL("./fixtures/agy-cli.cjs", import.meta.url)) } })
+    const content: readonly TestMessage[] = [
+      { role: "user", content: "Original goal" },
+      { role: "assistant", content: ["toolu_agy_first", "toolu_agy_second"].map(id => ({ type: "tool_use", id, name: "lookup", input: {} })) },
+      { role: "user", content: returned.map((id, index) => ({ type: "tool_result", tool_use_id: id, content: "Subagent report " + (index + 1) })) },
+      { role: "user", content: "Newest human instruction" },
+    ]
+    capturedReplayPrompt = []
+    try {
+      const response = await postMessages(server.app, { headers: { "x-opencode-session": "standalone-agy-" + batch },
+        model: "claude-fable-5-2", stream: false, content })
+      const responseBody = await response.text()
+      expect(response.status, responseBody).toBe(status)
+      if (status === 409) {
+        expect(response.headers.get("x-should-retry")).toBe("false")
+        expect(capturedSdkCalls).toEqual([])
+        return
+      }
+      expect(capturedSdkCalls).toHaveLength(1)
+      expect(capturedSdkCalls[0]?.resume).toBeUndefined()
+      expect(typeof capturedSdkCalls[0]?.sessionId).toBe("string")
+      const replay = capturedReplayPrompt.join("\n")
+      expect(replay.trimEnd().endsWith("Newest human instruction")).toBe(true)
+      for (const [id, report] of [["toolu_agy_first", "Subagent report 1"], ["toolu_agy_second", "Subagent report 2"]]) {
+        expect(replay).toContain('Previously called tool: {"id":"' + id + '","name":"lookup","input":{}}')
+        expect(replay).toContain('Recorded tool result: {"tool_use_id":"' + id + '","is_error":false}:\n' + report)
+      }
+      expect(replay).not.toContain('"type":"tool_use"')
+    } finally {
+      capturedReplayPrompt = undefined
+      await server.closeBackend?.()
+    }
+  })
+
   it("falls through the Claude pool to agy and recovers its first tool batch after restart", async () => {
     const dir = mkdtempSync(join(tmpdir(), "meridian-combined-priority-"))
     const open = () => createProxyServer({ port: 0, host: "127.0.0.1", backend: "combined", profiles: PROFILES, defaultProfile: "work",
@@ -643,6 +684,11 @@ describe("priority routing", () => {
       const content = [{ role: "user", content: "get receipt" }, { role: "assistant", content: reply.content },
         { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "receipt from the client" }] }] as const
       capturedSdkCalls = []
+      const unavailable = await postMessages(server.app, { headers: { ...headers, "x-opencode-thinking": "disabled" },
+        model, tools, stream: false, content })
+      expect(unavailable.status).toBe(409)
+      expect(unavailable.headers.get("x-should-retry")).toBe("false")
+      expect(capturedSdkCalls).toEqual([])
       const forged = [content[0], { role: "assistant", content: [{ ...firstCall, input: { key: "not the delivered call" } }] }, content[2]] as const
       const conflict = await postMessages(server.app, { headers, model, thinking: { type: "adaptive" }, tools, stream: false, content: forged })
       expect(conflict.status).toBe(409)

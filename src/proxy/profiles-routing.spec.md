@@ -73,6 +73,14 @@ not a new inference or a Claude retry. A backend transition on a new eligible
 turn replays the full supplied history. Do not mix old and new writers against
 a shared store or downgrade with outstanding agy tool rounds.
 
+An unpinned, keyed Claude request to /v1/messages can also make a fresh
+Claude replay when the trailing results are all agy IDs and match the last
+assistant's complete tool batch exactly, with no duplicates. The durable route
+must have neither an agy assignment nor an open attempt. The client-selected
+Claude route then treats the complete batch as history, not as work to run or
+deliver to agy. Other owner conflicts return 409 with x-should-retry: false;
+durable lookup failures still return 503. Pool enrollment is unchanged.
+
 User-facing behavior: `docs/profiles.md`. Throttling and `[1m]` bench scope:
 [`architecture`](../../ARCHITECTURE.md) → *Throttling Contract*.
 
